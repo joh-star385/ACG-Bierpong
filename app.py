@@ -20,7 +20,7 @@ if 'matches' not in st.session_state:
     st.session_state.matches = [
         {
             "id": i, "t1_p1": g[0], "t1_p2": g[1], "t2_p1": g[2], "t2_p2": g[3], 
-            "t1_score": None, "t2_score": None, "live_backup": None
+            "t1_score": None, "t2_score": None, "stats": None, "last_scorer": None, "live_backup": None
         }
         for i, g in enumerate(games_logic)
     ]
@@ -50,6 +50,7 @@ def save_step():
         'possession': st.session_state.live['possession'],
         'balls_back': st.session_state.live['balls_back'],
         'pending_bomb': st.session_state.live.get('pending_bomb', False),
+        'last_scorer': st.session_state.live.get('last_scorer', None),
         'stats': st.session_state.live['stats']
     }))
 
@@ -59,28 +60,31 @@ def change_possession(new_poss):
     if new_poss == 1: live['stats']['turns_t1'] += 1
     else: live['stats']['turns_t2'] += 1
 
-def add_stat(p_idx, hits, throws):
-    st.session_state.live['stats'][f'p{p_idx}_h'] += hits
-    st.session_state.live['stats'][f'p{p_idx}_t'] += throws
-
-def do_hit(team_hitting, amount, p_hit_idx=None, p_miss_idx=None, is_balls_back=False):
+def do_hit(team_hitting, amount, hits=[], misses=[], bombe_thrower=None, is_balls_back=False):
     save_step()
     live = st.session_state.live
     live['balls_back'] = is_balls_back
     
+    # Letzten Torschützen merken (für Game Winner / Vollstrecker)
+    if bombe_thrower is not None:
+        live['last_scorer'] = bombe_thrower
+    elif hits:
+        live['last_scorer'] = hits[0] # Bei Einzel/Doppel der Schütze
+        
     # Becher abziehen
     if team_hitting == 1: live['t2_cups'] = max(0, live['t2_cups'] - amount)
     else: live['t1_cups'] = max(0, live['t1_cups'] - amount)
     
-    # Statistiken aktualisieren
-    if amount == 1 and p_hit_idx is not None and p_miss_idx is not None:
-        add_stat(p_hit_idx, 1, 1); add_stat(p_miss_idx, 0, 1) # 1 trifft, 1 verfehlt
-    elif amount == 2 and p_hit_idx is not None and p_miss_idx is not None:
-        add_stat(p_hit_idx, 1, 1); add_stat(p_miss_idx, 1, 1) # Beide treffen
-    elif amount == 3 and p_hit_idx is not None and p_miss_idx is not None:
-        add_stat(p_hit_idx, 2, 2); add_stat(p_miss_idx, 1, 1) # Bombe (ausgewählter wirft 2x)
+    # Individuelle Statistiken aktualisieren
+    for p in hits:
+        live['stats'][f'p{p}_h'] += 1
+        live['stats'][f'p{p}_t'] += 1
+    for p in misses:
+        live['stats'][f'p{p}_t'] += 1
+    if bombe_thrower is not None:
+        live['stats'][f'p{bombe_thrower}_b'] += 1
         
-    # Ballbesitz
+    # Ballbesitz wechseln (wenn nicht Balls Back)
     if not is_balls_back:
         change_possession(2 if team_hitting == 1 else 1)
         
@@ -95,12 +99,12 @@ def do_miss(team):
     live = st.session_state.live
     live['balls_back'] = False
     m = st.session_state.matches[live['match_id']]
-    # Beide Fehlwurf
+    # Beide Spieler haben geworfen und verfehlt (+1 Wurf, +0 Treffer)
     if team == 1:
-        add_stat(m['t1_p1'], 0, 1); add_stat(m['t1_p2'], 0, 1)
+        live['stats'][f"p{m['t1_p1']}_t"] += 1; live['stats'][f"p{m['t1_p2']}_t"] += 1
         change_possession(2)
     else:
-        add_stat(m['t2_p1'], 0, 1); add_stat(m['t2_p2'], 0, 1)
+        live['stats'][f"p{m['t2_p1']}_t"] += 1; live['stats'][f"p{m['t2_p2']}_t"] += 1
         change_possession(1)
 
 def do_penalty(team):
@@ -109,17 +113,13 @@ def do_penalty(team):
     if team == 1: live['t1_cups'] = max(0, live['t1_cups'] - 1)
     else: live['t2_cups'] = max(0, live['t2_cups'] - 1)
 
-def get_pct(hits, throws):
-    if throws == 0: return 0
-    return int((hits / throws) * 100)
+# 5. Tabs Layout
+tab1, tab2, tab3 = st.tabs(["🎮 Live Spiel", "🏆 Tabelle & Spielplan", "📊 Einzel-Statistiken"])
 
-# 5. Tabs
-tab1, tab2 = st.tabs(["🎮 Live Spiel", "🏆 Tabelle & Spielplan"])
-
+# --- TAB 1: LIVE SPIEL ---
 with tab1:
     if st.session_state.live is None:
         st.subheader("Spiel auswählen")
-        
         match_opts = {}
         next_open_found = False
         for m in st.session_state.matches:
@@ -137,11 +137,11 @@ with tab1:
                     match_opts[m['id']] = f"⚪ OFFEN - {txt}"
                     
         sel_id = st.selectbox("Wähle ein Spiel aus der Liste:", options=list(match_opts.keys()), format_func=lambda x: match_opts[x])
-        
         sel_m = st.session_state.matches[sel_id]
+        
         if sel_m['t1_score'] is not None:
             st.info(f"Dieses Spiel ist bereits beendet (Ergebnis: {sel_m['t1_score']}:{sel_m['t2_score']} Rest-Becher).")
-            if st.button("✏️ Spiel neu bearbeiten", use_container_width=True):
+            if st.button("✏️ Spiel neu bearbeiten (Altes Ergebnis überschreiben)", use_container_width=True):
                 st.session_state.live = copy.deepcopy(sel_m['live_backup'])
                 sel_m['t1_score'] = None
                 sel_m['t2_score'] = None
@@ -152,13 +152,13 @@ with tab1:
                     'match_id': sel_id, 'starter': None, 'possession': None,
                     't1_cups': 10, 't2_cups': 10, 'nachwurf': None, 
                     'balls_back': False, 'pending_bomb': False, 'bomb_team': None,
-                    'history': [],
+                    'last_scorer': None, 'history': [],
                     'stats': {
                         'turns_t1': 0, 'turns_t2': 0,
-                        f"p{sel_m['t1_p1']}_h": 0, f"p{sel_m['t1_p1']}_t": 0,
-                        f"p{sel_m['t1_p2']}_h": 0, f"p{sel_m['t1_p2']}_t": 0,
-                        f"p{sel_m['t2_p1']}_h": 0, f"p{sel_m['t2_p1']}_t": 0,
-                        f"p{sel_m['t2_p2']}_h": 0, f"p{sel_m['t2_p2']}_t": 0,
+                        f"p{sel_m['t1_p1']}_h": 0, f"p{sel_m['t1_p1']}_t": 0, f"p{sel_m['t1_p1']}_b": 0,
+                        f"p{sel_m['t1_p2']}_h": 0, f"p{sel_m['t1_p2']}_t": 0, f"p{sel_m['t1_p2']}_b": 0,
+                        f"p{sel_m['t2_p1']}_h": 0, f"p{sel_m['t2_p1']}_t": 0, f"p{sel_m['t2_p1']}_b": 0,
+                        f"p{sel_m['t2_p2']}_h": 0, f"p{sel_m['t2_p2']}_t": 0, f"p{sel_m['t2_p2']}_b": 0,
                     }
                 }
                 st.rerun()
@@ -191,13 +191,7 @@ with tab1:
                 st.markdown(f"<div style='text-align: center;'><span style='font-size: 80px; font-weight: bold; color: {'#9C0006' if live['t1_cups']==0 else 'inherit'};'>{live['t1_cups']}</span><br><span style='font-size: 20px;'>Becher</span></div>", unsafe_allow_html=True)
                 if live['starter'] == 1: st.markdown("<p style='text-align:center; color:gray;'>🏁 Starter</p>", unsafe_allow_html=True)
                 elif live['starter'] == 2: st.markdown("<p style='text-align:center; color:gray;'>🛡️ Hat Nachwurf</p>", unsafe_allow_html=True)
-                st.markdown(f"<p style='text-align:center; font-weight:bold;'>Zug-Nr: {live['stats']['turns_t1']}</p>", unsafe_allow_html=True)
-                
-                # Individuelle Stats Team 1
-                s1_h, s1_t = live['stats'][f'p{i_p1}_h'], live['stats'][f'p{i_p1}_t']
-                s2_h, s2_t = live['stats'][f'p{i_p2}_h'], live['stats'][f'p{i_p2}_t']
                 st.markdown(f"<h3 style='text-align: center;'>{p1} & {p2}</h3>", unsafe_allow_html=True)
-                st.markdown(f"<p style='text-align:center;'>{p1}: {s1_h} Treffer ({get_pct(s1_h, s1_t)}%)<br>{p2}: {s2_h} Treffer ({get_pct(s2_h, s2_t)}%)</p>", unsafe_allow_html=True)
                 if live['possession'] == 1 and not live.get('pending_bomb', False): st.info("🟢 BALLBESITZ")
 
             with disp_vs:
@@ -207,13 +201,7 @@ with tab1:
                 st.markdown(f"<div style='text-align: center;'><span style='font-size: 80px; font-weight: bold; color: {'#9C0006' if live['t2_cups']==0 else 'inherit'};'>{live['t2_cups']}</span><br><span style='font-size: 20px;'>Becher</span></div>", unsafe_allow_html=True)
                 if live['starter'] == 2: st.markdown("<p style='text-align:center; color:gray;'>🏁 Starter</p>", unsafe_allow_html=True)
                 elif live['starter'] == 1: st.markdown("<p style='text-align:center; color:gray;'>🛡️ Hat Nachwurf</p>", unsafe_allow_html=True)
-                st.markdown(f"<p style='text-align:center; font-weight:bold;'>Zug-Nr: {live['stats']['turns_t2']}</p>", unsafe_allow_html=True)
-                
-                # Individuelle Stats Team 2
-                s3_h, s3_t = live['stats'][f'p{i_p3}_h'], live['stats'][f'p{i_p3}_t']
-                s4_h, s4_t = live['stats'][f'p{i_p4}_h'], live['stats'][f'p{i_p4}_t']
                 st.markdown(f"<h3 style='text-align: center;'>{p3} & {p4}</h3>", unsafe_allow_html=True)
-                st.markdown(f"<p style='text-align:center;'>{p3}: {s3_h} Treffer ({get_pct(s3_h, s3_t)}%)<br>{p4}: {s4_h} Treffer ({get_pct(s4_h, s4_t)}%)</p>", unsafe_allow_html=True)
                 if live['possession'] == 2 and not live.get('pending_bomb', False): st.info("🟢 BALLBESITZ")
 
             st.write("---")
@@ -223,23 +211,22 @@ with tab1:
                 st.warning("💣 DREIFACHTREFFER! Welcher Spieler hat den ZWEITEN Ball versenkt?")
                 bp1, bp2 = st.columns(2)
                 if live['bomb_team'] == 1:
-                    if bp1.button(f"{p1} hat nachgeworfen", use_container_width=True): do_hit(1, 3, i_p1, i_p2, True); live['pending_bomb'] = False; st.rerun()
-                    if bp2.button(f"{p2} hat nachgeworfen", use_container_width=True): do_hit(1, 3, i_p2, i_p1, True); live['pending_bomb'] = False; st.rerun()
+                    if bp1.button(f"{p1} hat nachgeworfen", use_container_width=True): do_hit(1, 3, hits=[i_p1, i_p2], bombe_thrower=i_p1, is_balls_back=True); live['pending_bomb'] = False; st.rerun()
+                    if bp2.button(f"{p2} hat nachgeworfen", use_container_width=True): do_hit(1, 3, hits=[i_p1, i_p2], bombe_thrower=i_p2, is_balls_back=True); live['pending_bomb'] = False; st.rerun()
                 else:
-                    if bp1.button(f"{p3} hat nachgeworfen", use_container_width=True): do_hit(2, 3, i_p3, i_p4, True); live['pending_bomb'] = False; st.rerun()
-                    if bp2.button(f"{p4} hat nachgeworfen", use_container_width=True): do_hit(2, 3, i_p4, i_p3, True); live['pending_bomb'] = False; st.rerun()
+                    if bp1.button(f"{p3} hat nachgeworfen", use_container_width=True): do_hit(2, 3, hits=[i_p3, i_p4], bombe_thrower=i_p3, is_balls_back=True); live['pending_bomb'] = False; st.rerun()
+                    if bp2.button(f"{p4} hat nachgeworfen", use_container_width=True): do_hit(2, 3, hits=[i_p3, i_p4], bombe_thrower=i_p4, is_balls_back=True); live['pending_bomb'] = False; st.rerun()
             else:
                 colL, colR = st.columns(2)
-                
                 # TEAM 1
                 with colL:
                     if live['possession'] == 1:
                         st.button("🚫 Kein Treffer (Wechsel)", use_container_width=True, on_click=lambda: do_miss(1))
                         c_h1, c_h2 = st.columns(2)
-                        if c_h1.button(f"🎯 Treffer {p1}", use_container_width=True, disabled=live['t2_cups']==0): do_hit(1, 1, i_p1, i_p2); st.rerun()
-                        if c_h2.button(f"🎯 Treffer {p2}", use_container_width=True, disabled=live['t2_cups']==0): do_hit(1, 1, i_p2, i_p1); st.rerun()
+                        if c_h1.button(f"🎯 Treffer {p1}", use_container_width=True, disabled=live['t2_cups']==0): do_hit(1, 1, hits=[i_p1], misses=[i_p2]); st.rerun()
+                        if c_h2.button(f"🎯 Treffer {p2}", use_container_width=True, disabled=live['t2_cups']==0): do_hit(1, 1, hits=[i_p2], misses=[i_p1]); st.rerun()
                         c_s1, c_s2 = st.columns(2)
-                        if c_s1.button("✌️ Doppel (-2, Balls Back)", use_container_width=True, disabled=live['t2_cups']==0): do_hit(1, 2, i_p1, i_p2, True); st.rerun()
+                        if c_s1.button("✌️ Doppel (-2, Balls Back)", use_container_width=True, disabled=live['t2_cups']==0): do_hit(1, 2, hits=[i_p1, i_p2], is_balls_back=True); st.rerun()
                         if c_s2.button("💣 Dreifach (-3)", use_container_width=True, disabled=live['t2_cups']==0): 
                             save_step(); live['pending_bomb'] = True; live['bomb_team'] = 1; st.rerun()
                     st.write("")
@@ -250,17 +237,16 @@ with tab1:
                     if live['possession'] == 2:
                         st.button("🚫 Kein Treffer (Wechsel)", use_container_width=True, on_click=lambda: do_miss(2))
                         c_h3, c_h4 = st.columns(2)
-                        if c_h3.button(f"🎯 Treffer {p3}", use_container_width=True, disabled=live['t1_cups']==0): do_hit(2, 1, i_p3, i_p4); st.rerun()
-                        if c_h4.button(f"🎯 Treffer {p4}", use_container_width=True, disabled=live['t1_cups']==0): do_hit(2, 1, i_p4, i_p3); st.rerun()
+                        if c_h3.button(f"🎯 Treffer {p3}", use_container_width=True, disabled=live['t1_cups']==0): do_hit(2, 1, hits=[i_p3], misses=[i_p4]); st.rerun()
+                        if c_h4.button(f"🎯 Treffer {p4}", use_container_width=True, disabled=live['t1_cups']==0): do_hit(2, 1, hits=[i_p4], misses=[i_p3]); st.rerun()
                         c_s3, c_s4 = st.columns(2)
-                        if c_s3.button("✌️ Doppel (-2, Balls Back)", use_container_width=True, disabled=live['t1_cups']==0): do_hit(2, 2, i_p3, i_p4, True); st.rerun()
+                        if c_s3.button("✌️ Doppel (-2, Balls Back)", use_container_width=True, disabled=live['t1_cups']==0): do_hit(2, 2, hits=[i_p3, i_p4], is_balls_back=True); st.rerun()
                         if c_s4.button("💣 Dreifach (-3)", use_container_width=True, disabled=live['t1_cups']==0): 
                             save_step(); live['pending_bomb'] = True; live['bomb_team'] = 2; st.rerun()
                     st.write("")
                     if st.button("⚠️ Fehler Team 2 (-1 Becher)", use_container_width=True): do_penalty(2); st.rerun()
 
             st.write("---")
-            
             # --- KONTROLL-LEISTE ---
             ctrl1, ctrl2, ctrl3 = st.columns(3)
             with ctrl1:
@@ -269,7 +255,7 @@ with tab1:
                     live['t1_cups'], live['t2_cups'] = last['t1_cups'], last['t2_cups']
                     live['nachwurf'], live['possession'] = last['nachwurf'], last['possession']
                     live['balls_back'], live['pending_bomb'] = last['balls_back'], last['pending_bomb']
-                    live['stats'] = last['stats']
+                    live['last_scorer'], live['stats'] = last['last_scorer'], last['stats']
                     st.rerun()
                     
             with ctrl2:
@@ -289,6 +275,8 @@ with tab1:
                 if st.button("💾 Speichern (Rest-Becher)", use_container_width=True, type="primary", disabled=not can_save):
                     m['t1_score'] = live['t1_cups']
                     m['t2_score'] = live['t2_cups']
+                    m['stats'] = copy.deepcopy(live['stats'])
+                    m['last_scorer'] = live.get('last_scorer', None)
                     m['live_backup'] = copy.deepcopy(live)
                     st.session_state.live = None
                     st.rerun()
@@ -298,10 +286,9 @@ with tab1:
                         live['t1_cups'], live['t2_cups'], live['nachwurf'] = 3, 3, None 
                         st.rerun()
 
-# --- TAB 2: TABELLE & SPIELPLAN (Logik aus V18) ---
+# --- TAB 2: TABELLE & SPIELPLAN (Mit Elbo-Fix) ---
 with tab2:
     st.subheader("Die Meister-Tabelle")
-    
     players = st.session_state.players
     matches = st.session_state.matches
     
@@ -333,6 +320,7 @@ with tab2:
     is_finished = sum(1 for m in matches if m['t1_score'] is not None) == 15
     max_score = max(ps['Score'] for ps in player_stats) if player_stats else 0
 
+    # ELBO-FIX Logik
     for ps in player_stats:
         max_pot = ps['Score'] + ps['Rest'] * 10010
         min_opp_scores = []
@@ -356,6 +344,110 @@ with tab2:
         if val == 'Eliminated': return 'color: #9C0006; font-weight: bold'
         if val == 'Titel drin': return 'color: #008000; font-weight: bold'
         if val == '👑 MEISTER': return 'background-color: #FFD966; color: black; font-weight: bold'
+        if isinstance(val, int) and val > 0: return 'color: #008000; font-weight: bold'
+        if isinstance(val, int) and val < 0: return 'color: #FF0000; font-weight: bold'
+        if isinstance(val, str) and 'S' in val and val != "STATUS": return 'color: #008000; font-weight: bold'
+        if isinstance(val, str) and 'N' in val and val != "NAME" and val != "STATUS": return 'color: #FF0000; font-weight: bold'
         return ''
 
     st.dataframe(df[['RANG', 'NAME', 'SP', 'S', 'N', 'DIFF', 'S%', 'SERIE', ' ', 'STATUS']].style.map(style_df), hide_index=True, use_container_width=True)
+
+    st.divider()
+    
+    col_stat1, col_stat2 = st.columns(2)
+    with col_stat1:
+        st.subheader("Höchste Siege (Top 3)")
+        match_diffs = []
+        for m in matches:
+            if m['t1_score'] is not None:
+                diff = abs(m['t1_score'] - m['t2_score'])
+                text = f"Spiel {m['id']+1}: {players[m['t1_p1']]}/{players[m['t1_p2']]} vs {players[m['t2_p1']]}/{players[m['t2_p2']]} ({m['t1_score']}:{m['t2_score']})"
+                match_diffs.append({'Spiel': text, 'Diff': diff})
+        
+        if match_diffs:
+            df_top_matches = pd.DataFrame(match_diffs).sort_values(by='Diff', ascending=False).head(3)
+            st.dataframe(df_top_matches[['Spiel']], hide_index=True, use_container_width=True)
+        else:
+            st.write("Noch keine Spiele absolviert.")
+
+        st.subheader("Bestes Duo (Top 3)")
+        pairs = [(0,1), (0,2), (0,3), (0,4), (1,2), (1,3), (1,4), (2,3), (2,4), (3,4)]
+        duo_stats = []
+        for p1, p2 in pairs:
+            sp = s = diff = 0
+            for m in matches:
+                t1, t2 = m['t1_score'], m['t2_score']
+                if t1 is not None:
+                    team1, team2 = [m['t1_p1'], m['t1_p2']], [m['t2_p1'], m['t2_p2']]
+                    if p1 in team1 and p2 in team1:
+                        sp += 1
+                        if t1 > t2: s += 1
+                        diff += (t1 - t2)
+                    elif p1 in team2 and p2 in team2:
+                        sp += 1
+                        if t2 > t1: s += 1
+                        diff += (t2 - t1)
+            duo_stats.append({'Paar': f"{players[p1]} & {players[p2]}", 'SP': sp, 'S': s, 'DIFF': diff})
+        
+        df_duos = pd.DataFrame(duo_stats).sort_values(by=['S', 'DIFF'], ascending=[False, False]).head(3).reset_index(drop=True)
+        df_duos.index += 1
+        df_duos.insert(0, 'RANG', df_duos.index)
+        st.dataframe(df_duos, hide_index=True, use_container_width=True)
+
+    with col_stat2:
+        st.subheader("Offene Partner-Spiele")
+        matrix = []
+        for r in range(5):
+            row = { "Spieler": players[r] }
+            for c in range(5):
+                if r == c: row[players[c]] = "-"
+                else:
+                    open_games = sum(1 for m in matches if m['t1_score'] is None and r in [m['t1_p1'], m['t1_p2'], m['t2_p1'], m['t2_p2']] and c in [m['t1_p1'], m['t1_p2'], m['t2_p1'], m['t2_p2']])
+                    row[players[c]] = str(open_games)
+            matrix.append(row)
+        st.dataframe(pd.DataFrame(matrix), hide_index=True, use_container_width=True)
+
+# --- TAB 3: INDIVIDUELLE STATISTIKEN ---
+with tab3:
+    st.subheader("📊 Individuelle Leistungen")
+    
+    ind_stats = []
+    for i, p in enumerate(st.session_state.players):
+        hits = throws = bombs = gw = 0
+        for m in st.session_state.matches:
+            if m['t1_score'] is not None and m['stats'] is not None:
+                hits += m['stats'].get(f'p{i}_h', 0)
+                throws += m['stats'].get(f'p{i}_t', 0)
+                bombs += m['stats'].get(f'p{i}_b', 0)
+                if m.get('last_scorer') == i:
+                    gw += 1
+        
+        quote = (hits / throws * 100) if throws > 0 else 0.0
+        ind_stats.append({
+            'id': i, 'NAME': p, 'TREFFER': hits, 'WÜRFE': throws, 
+            'QUOTE_VAL': quote, 'QUOTE': f"{quote:.2f} %", 
+            'SIEGTREFFER': gw, 'DREIFACHTREFFER': bombs
+        })
+    
+    col_i1, col_i2, col_i3 = st.columns(3)
+    
+    with col_i1:
+        st.write("**🎯 Trefferquoten**")
+        df_quote = pd.DataFrame(ind_stats).sort_values(by=['QUOTE_VAL', 'TREFFER'], ascending=[False, False]).reset_index(drop=True)
+        df_quote.index += 1
+        df_quote.insert(0, 'RANG', df_quote.index)
+        st.dataframe(df_quote[['RANG', 'NAME', 'TREFFER', 'WÜRFE', 'QUOTE']], hide_index=True, use_container_width=True)
+
+    with col_i2:
+        st.write("**🔪 Vollstrecker (Game Winners)**")
+        df_gw = pd.DataFrame(ind_stats).sort_values(by='SIEGTREFFER', ascending=False).reset_index(drop=True)
+        df_gw.index += 1
+        df_gw.insert(0, 'RANG', df_gw.index)
+        st.dataframe(df_gw[['RANG', 'NAME', 'SIEGTREFFER']], hide_index=True, use_container_width=True)
+
+    with col_i3:
+        st.write("**💣 Die Bomber**")
+        df_bomb = pd.DataFrame(ind_stats).sort_values(by='DREIFACHTREFFER', ascending=False).reset_index(drop=True)
+        df_bomb.index += 1
+        df_bomb.insert(0, 'RANG', df_bomb.index)
+        st.dataframe(df_bomb[['RANG', 'NAME', 'DREIFACHTREFFER']], hide_index=True, use_container_width=True)
