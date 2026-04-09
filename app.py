@@ -21,59 +21,6 @@ if 'matches' not in st.session_state:
         {
             "id": i, "t1_p1": g[0], "t1_p2": g[1], "t2_p1": g[2], "t2_p2": g[3], 
             "t1_score": None, "t2_score": None, "stats": None, "last_scorer": None, 
-            "total_turns": 0, "action_log": [], "live_backup": None
-        }
-        for i, g in enumerate(games_logic)
-    ]
-
-if 'live' not in st.session_state: 
-    st.session_state.live = None
-
-if 'confirm_abort' not in st.session_state:
-    st.session_state.confirm_abort = False
-
-# 3. Sidebar
-with st.sidebar:
-    st.header("⚙️ Einstellungen")
-    st.session_state.t_name = st.text_input("Turnier Name", st.session_state.t_name)
-    st.write("---")
-    for i in range(5):
-        st.session_state.players[i] = st.text_input(f"Spieler {i+1}", value=st.session_state.players[i])
-
-st.title(f"👑 {st.session_state.t_name}")
-
-# 4. Hilfsfunktionen für das Live-Spiel
-def save_step():
-    st.session_state.live['history'].append(copy.deepcopy({
-        't1_cups': st.session_state.live['t1_cups'],
-        't2_cups': st.session_state.live['t2_cups'],
-        'nachwurf': st.session_state.live['nachwurf'],
-        'possession': st.session_state.live['possession'],
-        'balls_back': st.session_state.live['balls_back'],
-        'pending_bomb': st.session_state.live.get('pending_bomb', False),
-        'last_scorer': st.session_state.live.get('last_scorer', None),import streamlit as st
-import pandas as pd
-import copy
-
-# 1. Seiten-Design
-st.set_page_config(page_title="Bierpong Live-App", page_icon="🍺", layout="wide")
-
-# 2. Session State initialisieren
-if 't_name' not in st.session_state: 
-    st.session_state.t_name = "Bierpong Meisterschaft"
-if 'players' not in st.session_state: 
-    st.session_state.players = ['Spieler 1', 'Spieler 2', 'Spieler 3', 'Spieler 4', 'Spieler 5']
-
-if 'matches' not in st.session_state:
-    games_logic = [
-        [0, 1, 2, 3], [1, 2, 3, 4], [2, 3, 4, 0], [3, 4, 0, 1], [4, 0, 1, 2],
-        [0, 2, 1, 3], [1, 3, 2, 4], [2, 4, 3, 0], [3, 0, 4, 1], [4, 1, 0, 2],
-        [0, 3, 1, 2], [1, 4, 2, 3], [2, 0, 3, 4], [3, 1, 4, 0], [4, 2, 0, 1]
-    ]
-    st.session_state.matches = [
-        {
-            "id": i, "t1_p1": g[0], "t1_p2": g[1], "t2_p1": g[2], "t2_p2": g[3], 
-            "t1_score": None, "t2_score": None, "stats": None, "last_scorer": None, 
             "winner_turns": 0, "action_log": [], "live_backup": None
         }
         for i, g in enumerate(games_logic)
@@ -277,11 +224,11 @@ with tab1:
             cA, cB = st.columns(2)
             if cA.button(f"{p1} & {p2} beginnen", use_container_width=True): 
                 live['starter'] = 1; live['possession'] = 1; live['stats']['turns_t1'] = 1
-                log_action(f"🏁 {p1} & {p2} fangen an.")
+                log_action(f"🏁 Team 1 ({p1} & {p2}) fängt an.")
                 st.rerun()
             if cB.button(f"{p3} & {p4} beginnen", use_container_width=True): 
                 live['starter'] = 2; live['possession'] = 2; live['stats']['turns_t2'] = 1
-                log_action(f"🏁 {p3} & {p4} fangen an.")
+                log_action(f"🏁 Team 2 ({p3} & {p4}) fängt an.")
                 st.rerun()
             st.button("❌ Spiel abbrechen", on_click=lambda: st.session_state.update(live=None))
         
@@ -293,7 +240,6 @@ with tab1:
             disp1, disp_vs, disp2 = st.columns([5, 1, 5])
             
             with disp1:
-                # Kompaktere Becher & Info Anzeige
                 st.markdown(f"<div style='text-align: center; line-height: 1.1; margin-bottom: 10px;'><span style='font-size: 55px; font-weight: bold; color: {'#9C0006' if live['t1_cups']==0 else 'inherit'};'>{live['t1_cups']}</span><span style='font-size: 16px;'> Becher</span></div>", unsafe_allow_html=True)
                 st_txt = "🏁 Starter" if live['starter'] == 1 else "🛡️ Hat Nachwurf" if live['starter'] == 2 else ""
                 st.markdown(f"<p style='text-align:center; color:gray; font-size:14px; margin:0;'>{st_txt} | Zug-Nr: {live['stats']['turns_t1']}</p>", unsafe_allow_html=True)
@@ -394,8 +340,7 @@ with tab1:
                     m['last_scorer'] = live.get('last_scorer', None)
                     m['action_log'] = copy.deepcopy(live['action_log'])
                     
-                    # Sieger-Züge für Blitzkrieg speichern
-                    if live['t1_cups'] == 0: m['winner_turns'] = live['stats']['turns_t2'] # T2 hat gewonnen, also T2 Züge
+                    if live['t1_cups'] == 0: m['winner_turns'] = live['stats']['turns_t2'] 
                     else: m['winner_turns'] = live['stats']['turns_t1']
                     
                     st.session_state.live = None
