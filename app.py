@@ -16,7 +16,8 @@ st.set_page_config(page_title="Bierpong Live-App", page_icon="🍺", layout="wid
 @st.cache_resource
 def init_firebase():
     if not firebase_admin._apps:
-        key_dict = json.loads(st.secrets["FIREBASE_KEY"])
+        # strict=False erlaubt kleine Formatierungsfehler wie echte Zeilenumbrüche
+        key_dict = json.loads(st.secrets["FIREBASE_KEY"], strict=False)
         cred = credentials.Certificate(key_dict)
         firebase_admin.initialize_app(cred)
     return firestore.client()
