@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import copy
 import json
+import time
 from datetime import date
 import io
 
@@ -12,11 +13,10 @@ from firebase_admin import credentials, firestore
 # 1. Seiten-Design
 st.set_page_config(page_title="Bierpong Live-App", page_icon="🍺", layout="wide")
 
-# Firebase sicher initialisieren (aus dem Streamlit Tresor)
+# Firebase initialisieren
 @st.cache_resource
 def init_firebase():
     if not firebase_admin._apps:
-        # strict=False erlaubt kleine Formatierungsfehler wie echte Zeilenumbrüche
         key_dict = json.loads(st.secrets["FIREBASE_KEY"], strict=False)
         cred = credentials.Certificate(key_dict)
         firebase_admin.initialize_app(cred)
@@ -26,18 +26,40 @@ try:
     db = init_firebase()
     db_connected = True
 except Exception as e:
-    st.error(f"Datenbank-Verbindungsfehler. Hast du das Secret richtig hinterlegt? Fehler: {e}")
+    st.error(f"Datenbank-Verbindungsfehler. Fehler: {e}")
     db_connected = False
 
-# Hilfsfunktionen
+# --- HILFSFUNKTIONEN FÜR TURNIERE & CLOUD ---
 def get_pct(hits, throws):
     return int((hits / throws) * 100) if throws > 0 else 0
 
-# --- CLOUD SYNC FUNKTIONEN ---
-def sync_to_cloud():
-    """Lädt den aktuellen Stand in die Cloud hoch (Nur für Master)"""
+def get_tournament_list():
+    """Holt eine Liste aller Turniere aus der Datenbank"""
     if db_connected:
-        doc_ref = db.collection('bierpong_turniere').document('live_turnier')
+        try:
+            docs = db.collection('bierpong_turniere').stream()
+            return {doc.id: doc.to_dict().get("t_name", "Unbekanntes Turnier") for doc in docs}
+        except Exception as e:
+            st.sidebar.error("Konnte Turnierliste nicht laden.")
+    return {}
+
+def load_tournament(doc_id):
+    """Lädt ein spezifisches Turnier in den Session State"""
+    if db_connected:
+        doc = db.collection('bierpong_turniere').document(doc_id).get()
+        if doc.exists:
+            data = doc.to_dict()
+            st.session_state.current_tournament_id = doc_id
+            st.session_state.t_name = data.get("t_name", "Bierpong Meisterschaft")
+            st.session_state.t_date = data.get("t_date", str(date.today()))
+            st.session_state.players = data.get("players", ['Spieler 1', 'Spieler 2', 'Spieler 3', 'Spieler 4', 'Spieler 5'])
+            st.session_state.matches = data.get("matches", generate_fresh_matches())
+            st.session_state.live = data.get("live", None)
+
+def sync_to_cloud():
+    """Speichert den aktuellen Stand unter der aktuellen Turnier-ID"""
+    if db_connected and st.session_state.current_tournament_id:
+        doc_ref = db.collection('bierpong_turniere').document(st.session_state.current_tournament_id)
         data = {
             "t_name": st.session_state.t_name,
             "t_date": str(st.session_state.t_date),
@@ -47,30 +69,13 @@ def sync_to_cloud():
         }
         doc_ref.set(data)
 
-def pull_from_cloud():
-    """Zieht den neuesten Stand aus der Cloud (Für Viewer)"""
-    if db_connected:
-        doc_ref = db.collection('bierpong_turniere').document('live_turnier')
-        doc = doc_ref.get()
-        if doc.exists:
-            data = doc.to_dict()
-            st.session_state.t_name = data.get("t_name", "Bierpong Meisterschaft")
-            st.session_state.players = data.get("players", st.session_state.players)
-            st.session_state.matches = data.get("matches", st.session_state.matches)
-            st.session_state.live = data.get("live", None)
-
-# 2. Session State initialisieren
-if 't_name' not in st.session_state: st.session_state.t_name = "Bierpong Meisterschaft"
-if 't_date' not in st.session_state: st.session_state.t_date = date.today()
-if 'players' not in st.session_state: st.session_state.players = ['Spieler 1', 'Spieler 2', 'Spieler 3', 'Spieler 4', 'Spieler 5']
-
-if 'matches' not in st.session_state:
+def generate_fresh_matches():
     games_logic = [
         [0, 1, 2, 3], [1, 2, 3, 4], [2, 3, 4, 0], [3, 4, 0, 1], [4, 0, 1, 2],
         [0, 2, 1, 3], [1, 3, 2, 4], [2, 4, 3, 0], [3, 0, 4, 1], [4, 1, 0, 2],
         [0, 3, 1, 2], [1, 4, 2, 3], [2, 0, 3, 4], [3, 1, 4, 0], [4, 2, 0, 1]
     ]
-    st.session_state.matches = [
+    return [
         {
             "id": i, "t1_p1": g[0], "t1_p2": g[1], "t2_p1": g[2], "t2_p2": g[3], 
             "t1_score": None, "t2_score": None, "stats": None, "last_scorer": None, 
@@ -80,8 +85,15 @@ if 'matches' not in st.session_state:
         for i, g in enumerate(games_logic)
     ]
 
+# 2. Session State initialisieren (falls leer)
+if 'current_tournament_id' not in st.session_state: st.session_state.current_tournament_id = None
+if 't_name' not in st.session_state: st.session_state.t_name = "Bierpong Meisterschaft"
+if 't_date' not in st.session_state: st.session_state.t_date = str(date.today())
+if 'players' not in st.session_state: st.session_state.players = ['Spieler 1', 'Spieler 2', 'Spieler 3', 'Spieler 4', 'Spieler 5']
+if 'matches' not in st.session_state: st.session_state.matches = generate_fresh_matches()
 if 'live' not in st.session_state: st.session_state.live = None
 if 'confirm_abort' not in st.session_state: st.session_state.confirm_abort = False
+if 'admin_auth' not in st.session_state: st.session_state.admin_auth = False
 
 def get_basic_standings():
     stats = []
@@ -103,25 +115,39 @@ def get_basic_standings():
     return df[['RANG', 'NAME', 'S', 'N']]
 
 # --- ZUSCHAUER / MASTER LOGIK ---
-is_master = False
 with st.sidebar:
-    st.header(f"🏆 {st.session_state.t_name}")
-    st.write("---")
-    pwd = st.text_input("🔒 Admin Passwort (nur für Eingabe-Gerät):", type="password")
-    if pwd == "acg987":
-        is_master = True
-        st.success("✅ Master-Modus aktiviert")
-    else:
-        st.info("👀 Zuschauer-Modus")
-        if st.button("🔄 Cloud aktualisieren", use_container_width=True):
-            pull_from_cloud()
+    if not st.session_state.admin_auth:
+        st.header("👀 Zuschauer-Modus")
+        pwd = st.text_input("🔒 Admin Passwort:", type="password")
+        if pwd == "acg987":
+            st.session_state.admin_auth = True
             st.rerun()
             
+        st.write("---")
+        st.write("**Welches Turnier möchtest du sehen?**")
+        all_t = get_tournament_list()
+        if all_t:
+            sel_view = st.selectbox("Turnier auswählen", options=list(all_t.keys()), format_func=lambda x: all_t[x])
+            if st.button("🔄 Turnier laden / Aktualisieren", use_container_width=True):
+                load_tournament(sel_view)
+                st.rerun()
+        else:
+            st.caption("Keine Turniere gefunden.")
+            
+    else:
+        st.header("👑 Master-Modus")
+        if st.button("🚪 Logout (Zurück zum Zuschauer-Modus)", use_container_width=True):
+            st.session_state.admin_auth = False
+            st.rerun()
+        
     st.write("---")
-    st.write("**Live Übersicht**")
-    st.dataframe(get_basic_standings(), hide_index=True, use_container_width=True)
+    st.write(f"**Live: {st.session_state.t_name}**")
+    if st.session_state.current_tournament_id:
+        st.dataframe(get_basic_standings(), hide_index=True, use_container_width=True)
+    else:
+        st.caption("Bitte lade oder erstelle erst ein Turnier.")
 
-# 4. Spiel-Logik (schreibt bei jedem Wurf in die Cloud)
+# 4. Spiel-Logik
 def save_step():
     l = st.session_state.live
     l['history'].append(copy.deepcopy({
@@ -200,7 +226,7 @@ def do_hit(team_hitting, amount, hits=[], misses=[], bombe_thrower=None, is_ball
         log_action(f"🚨 NACHWURF für {names[m['t1_p1']]} & {names[m['t1_p2']]}!")
         
     check_game_over()
-    sync_to_cloud() # Bei Treffer sofort Cloud aktualisieren
+    sync_to_cloud()
 
 def do_miss(team):
     save_step()
@@ -253,34 +279,67 @@ def do_penalty(team, culprit_idx):
     sync_to_cloud()
 
 
-# 5. TABS (Aufteilung nach Berechtigung)
-if is_master:
-    tab1, tab2, tab3, tab4 = st.tabs(["⚙️ Setup", "🎮 Live Spiel", "🏆 Tabelle & Spielplan", "📊 Statistiken"])
+# 5. TABS
+if st.session_state.admin_auth:
+    tab1, tab2, tab3, tab4 = st.tabs(["⚙️ Setup / Archiv", "🎮 Live Spiel", "🏆 Tabelle & Spielplan", "📊 Statistiken"])
 else:
-    # Viewer sehen nur Tab 3 und 4 (werden hier einfach als tab1, tab2 gerendert)
     tab3, tab4 = st.tabs(["🏆 Tabelle & Spielplan", "📊 Statistiken"])
 
 
-if is_master:
+if st.session_state.admin_auth:
     # --- TAB 1: SETUP ---
     with tab1:
-        st.subheader("Turnier einrichten / Starten")
+        st.subheader("📁 Turnier-Verwaltung")
+        
+        # BEREICH A: Bestehendes Turnier laden
+        st.write("**Bestehendes Turnier laden**")
+        all_t = get_tournament_list()
+        if all_t:
+            col_l1, col_l2 = st.columns([3, 1])
+            with col_l1:
+                sel_load = st.selectbox("Wähle ein Turnier aus der Datenbank:", options=list(all_t.keys()), format_func=lambda x: all_t[x])
+            with col_l2:
+                st.write("") # Spacer
+                st.write("")
+                if st.button("📂 Turnier laden", use_container_width=True):
+                    load_tournament(sel_load)
+                    st.success(f"Turnier '{all_t[sel_load]}' geladen!")
+                    st.rerun()
+        else:
+            st.info("Noch keine Turniere in der Datenbank.")
+            
+        st.divider()
+        
+        # BEREICH B: Neues Turnier anlegen
+        st.write("**Neues Turnier anlegen**")
         c1, c2 = st.columns(2)
         with c1:
-            st.session_state.t_name = st.text_input("Turnier Name", st.session_state.t_name)
-            # In Streamlit müssen wir sicherstellen, dass Datum nicht knallt
-            # Datum für Setup
+            new_name = st.text_input("Name für das neue Turnier", "Neues Turnier")
+            new_date = st.date_input("Datum", date.today())
         with c2:
-            st.write("Spieler-Namen:")
+            st.write("Spieler:")
+            new_p = []
             for i in range(5):
-                st.session_state.players[i] = st.text_input(f"Slot {i+1}", value=st.session_state.players[i], key=f"setup_p{i}")
-        if st.button("💾 Turnier in der Cloud initialisieren", type="primary"):
+                new_p.append(st.text_input(f"Slot {i+1}", value=f"Spieler {i+1}", key=f"new_p{i}"))
+                
+        if st.button("🆕 Neues Turnier erstellen & speichern", type="primary"):
+            # Generiere eine eindeutige ID aus Timestamp
+            new_id = f"turnier_{int(time.time())}"
+            st.session_state.current_tournament_id = new_id
+            st.session_state.t_name = new_name
+            st.session_state.t_date = str(new_date)
+            st.session_state.players = new_p
+            st.session_state.matches = generate_fresh_matches()
+            st.session_state.live = None
             sync_to_cloud()
-            st.success("Turnier online! Zuschauer können jetzt den Link öffnen.")
+            st.success(f"Turnier '{new_name}' erfolgreich erstellt! Du kannst jetzt zu 'Live Spiel' wechseln.")
+            st.rerun()
 
     # --- TAB 2: LIVE SPIEL ---
     with tab2:
-        if st.session_state.live is None:
+        if not st.session_state.current_tournament_id:
+            st.warning("⚠️ Bitte lade zuerst ein Turnier im Setup-Reiter oder erstelle ein neues.")
+        elif st.session_state.live is None:
             st.subheader("Spiel auswählen")
             match_opts = {}
             next_open_found = False
@@ -726,71 +785,3 @@ with tab4:
             
     with col_e2:
         st.write("**🚑 Nachwurf Retter**")
-        df_clutch = df_ind[df_ind['NACHWURF RETTER'] > 0].sort_values(by='NACHWURF RETTER', ascending=False).reset_index(drop=True)
-        if not df_clutch.empty:
-            df_clutch.index += 1
-            df_clutch.insert(0, 'RANG', df_clutch.index)
-            st.dataframe(df_clutch[['RANG', 'NAME', 'NACHWURF RETTER']], hide_index=True, use_container_width=True)
-        else: st.caption("Noch kein Ereignis.")
-            
-    with col_e3:
-        st.write("**🤡 Dummkopf (Fehler)**")
-        df_dk = df_ind[df_ind['FEHLER'] > 0].sort_values(by='FEHLER', ascending=False).reset_index(drop=True)
-        if not df_dk.empty:
-            df_dk.index += 1
-            df_dk.insert(0, 'RANG', df_dk.index)
-            st.dataframe(df_dk[['RANG', 'NAME', 'FEHLER']], hide_index=True, use_container_width=True)
-        else: st.caption("Noch kein Fehler begangen.")
-
-    st.divider()
-    
-    # SPIEL-STATISTIKEN (Höchste Siege & Schnellste Siege)
-    match_data = []
-    for m in st.session_state.matches:
-        if m['t1_score'] is not None:
-            diff = abs(m['t1_score'] - m['t2_score'])
-            turns = m.get('winner_turns', 0)
-            txt = f"Spiel {m['id']+1}: {players[m['t1_p1']]} & {players[m['t1_p2']]} vs {players[m['t2_p1']]} & {players[m['t2_p2']]}"
-            res = f"{m['t1_score']} : {m['t2_score']}"
-            match_data.append({'SPIEL': txt, 'ERGEBNIS': res, 'DIFF': diff, 'ZÜGE (SIEGER)': turns})
-
-    col_m1, col_m2 = st.columns(2)
-    
-    with col_m1:
-        st.write("**🏆 Höchster Sieg (Top 3)**")
-        if match_data:
-            df_hs = pd.DataFrame(match_data).sort_values(by=['DIFF', 'ZÜGE (SIEGER)'], ascending=[False, True]).head(3).reset_index(drop=True)
-            df_hs.index += 1
-            df_hs.insert(0, 'RANG', df_hs.index)
-            st.dataframe(df_hs[['RANG', 'SPIEL', 'ERGEBNIS', 'DIFF', 'ZÜGE (SIEGER)']], hide_index=True, use_container_width=True)
-        else:
-            st.caption("Noch keine Spiele absolviert.")
-
-    with col_m2:
-        st.write("**⚡ Schnellste Siege (Blitzkrieg - Top 3)**")
-        if match_data:
-            df_bk = pd.DataFrame(match_data).sort_values(by='ZÜGE (SIEGER)', ascending=True).head(3).reset_index(drop=True)
-            df_bk.index += 1
-            df_bk.insert(0, 'RANG', df_bk.index)
-            st.dataframe(df_bk[['RANG', 'SPIEL', 'ZÜGE (SIEGER)', 'ERGEBNIS']], hide_index=True, use_container_width=True)
-        else:
-            st.caption("Noch keine Spiele absolviert.")
-
-    st.write("---")
-    # EXCEL EXPORT
-    st.subheader("💾 Turnier Archivieren")
-    st.write("Lade dir die aktuellen Ergebnisse und alle Statistiken als saubere Excel-Datei herunter.")
-    
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_table[['RANG', 'NAME', 'SP', 'S', 'N', 'DIFF', 'S%', 'SERIE', 'STATUS']].to_excel(writer, sheet_name="Haupttabelle", index=False)
-        df_quote.to_excel(writer, sheet_name="Trefferquoten", index=False)
-        if match_data: df_hs.to_excel(writer, sheet_name="Höchste Siege", index=False)
-        
-    st.download_button(
-        label="📥 Gesamtes Turnier als Excel speichern",
-        data=buffer.getvalue(),
-        file_name=f"Bierpong_Turnier_{st.session_state.t_date}.xlsx",
-        mime="application/vnd.ms-excel",
-        type="primary"
-    )
