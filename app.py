@@ -6,6 +6,10 @@ from datetime import date
 # 1. Seiten-Design
 st.set_page_config(page_title="Bierpong Live-App", page_icon="🍺", layout="wide")
 
+# Hilfsfunktion global definieren
+def get_pct(hits, throws):
+    return int((hits / throws) * 100) if throws > 0 else 0
+
 # 2. Session State initialisieren
 if 't_name' not in st.session_state: st.session_state.t_name = "Bierpong Meisterschaft"
 if 't_date' not in st.session_state: st.session_state.t_date = date.today()
@@ -30,30 +34,29 @@ if 'matches' not in st.session_state:
 if 'live' not in st.session_state: st.session_state.live = None
 if 'confirm_abort' not in st.session_state: st.session_state.confirm_abort = False
 
-# Hilfsfunktion für Basis-Statistiken (für Sidebar)
+# Hilfsfunktion für Basis-Statistiken (für Sidebar - Kompakt!)
 def get_basic_standings():
     players = st.session_state.players
     matches = st.session_state.matches
     stats = []
     for i, p in enumerate(players):
-        sp = s = n = 0
+        s = n = 0
         for m in matches:
             t1, t2 = m['t1_score'], m['t2_score']
             if t1 is not None and t2 is not None:
                 if i in [m['t1_p1'], m['t1_p2']]:
-                    sp += 1
                     if t1 > t2: s += 1
                     else: n += 1
                 elif i in [m['t2_p1'], m['t2_p2']]:
-                    sp += 1
                     if t2 > t1: s += 1
                     else: n += 1
-        stats.append({'NAME': p, 'SP': sp, 'S': s, 'N': n, 'SCORE': s - n})
+        stats.append({'NAME': p, 'S': s, 'N': n, 'SCORE': s - n})
     
     df = pd.DataFrame(stats).sort_values(by=['SCORE', 'S'], ascending=[False, False]).reset_index(drop=True)
     df.index += 1
-    df.insert(0, '#', df.index)
-    return df[['#', 'NAME', 'SP', 'S', 'N']]
+    df.insert(0, 'RANG', df.index)
+    # Nur Rang, Name, Siege (S), Niederlagen (N) anzeigen
+    return df[['RANG', 'NAME', 'S', 'N']]
 
 # 3. Sidebar (Live Übersicht)
 with st.sidebar:
@@ -84,14 +87,10 @@ def save_step():
 
 def check_game_over():
     l = st.session_state.live
-    # Überprüfe, ob das Spiel physisch vorbei ist
     if l['t1_cups'] == 0 and l['t2_cups'] == 0:
         l['game_state'] = 'overtime_pending'
     elif l['t1_cups'] == 0 and l['t2_cups'] > 0:
-        # Team 2 hat 0 Becher, aber Team 1 hat noch Becher.
-        # Wenn Team 1 Starter war, ist das Spiel für Team 2 gewonnen.
         if l['starter'] == 1: l['game_state'] = 't2_won'
-        # Wenn Team 2 Starter war, hat Team 1 Nachwurf. Ist der Nachwurf verbraucht?
         elif l['starter'] == 2 and l['nachwurf'] is None and l.get('single_nachwurf_team') != 1:
             l['game_state'] = 't2_won'
     elif l['t2_cups'] == 0 and l['t1_cups'] > 0:
@@ -130,7 +129,6 @@ def do_hit(team_hitting, amount, hits=[], misses=[], bombe_thrower=None, is_ball
     if team_hitting == 1: live['t2_cups'] = max(0, live['t2_cups'] - amount)
     else: live['t1_cups'] = max(0, live['t1_cups'] - amount)
     
-    # Clutch Nachwurf Event speichern (rettet in die Verlängerung)
     if is_clutch_nachwurf and ((team_hitting == 1 and live['t2_cups'] == 0) or (team_hitting == 2 and live['t1_cups'] == 0)):
         live['clutch_nachwurf_events'].append(live['last_scorer'])
     
@@ -140,7 +138,6 @@ def do_hit(team_hitting, amount, hits=[], misses=[], bombe_thrower=None, is_ball
     if not is_balls_back:
         change_possession(2 if team_hitting == 1 else 1)
         
-    # Nachwurf einleiten (wenn nicht schon im Single-Nachwurf-Mode)
     if live['t2_cups'] == 0 and live['starter'] == 1 and live['nachwurf'] is None and live.get('single_nachwurf_team') != 2:
         live['nachwurf'] = 2; change_possession(2)
         log_action(f"🚨 NACHWURF (2 Bälle) für {names[m['t2_p1']]} & {names[m['t2_p2']]}!")
@@ -167,7 +164,6 @@ def do_miss(team):
         live['stats'][f"p{m['t2_p1']}_t"] += 1; live['stats'][f"p{m['t2_p2']}_t"] += 1
         change_possession(1)
         
-    # Wenn wir im Nachwurf sind und beide verfehlen -> Nachwurf beenden
     if live['nachwurf'] == team:
         live['nachwurf'] = None
     check_game_over()
@@ -181,7 +177,7 @@ def do_miss_single(team, shooter_idx):
     
     log_action(f"[Team {team} | Zug {turn}] 🚫 Nachwurf verfehlt von {names[shooter_idx]}")
     live['stats'][f"p{shooter_idx}_t"] += 1
-    live['single_nachwurf_team'] = None # Nachwurf vorbei
+    live['single_nachwurf_team'] = None 
     change_possession(2 if team == 1 else 1)
     check_game_over()
 
@@ -198,6 +194,7 @@ def do_penalty(team, culprit_idx):
     live['stats'][f'p{culprit_idx}_f'] += 1
     live['pending_penalty'] = None
     check_game_over()
+
 
 # 5. Tabs
 tab1, tab2, tab3, tab4 = st.tabs(["⚙️ Setup", "🎮 Live Spiel", "🏆 Tabelle & Spielplan", "📊 Statistiken"])
@@ -241,9 +238,7 @@ with tab2:
         if sel_m['t1_score'] is not None:
             st.info(f"Dieses Spiel ist bereits beendet (Ergebnis: {sel_m['t1_score']}:{sel_m['t2_score']} Rest-Becher).")
             if st.button("✏️ Spiel im Live-Modus bearbeiten", use_container_width=True):
-                # Wir laden das Backup exakt so, wie es am Ende war.
                 st.session_state.live = copy.deepcopy(sel_m['live_backup'])
-                # Das Ergebnis in der DB löschen, damit es wieder "offen" ist
                 sel_m['t1_score'] = None
                 sel_m['t2_score'] = None
                 st.rerun()
@@ -293,13 +288,12 @@ with tab2:
             bg_t2 = "transparent"
             
             if live['game_state'] == 't1_won':
-                bg_t1 = "#d4edda" # Grün
-                bg_t2 = "#f8d7da" # Rot
+                bg_t1 = "#d4edda"
+                bg_t2 = "#f8d7da"
             elif live['game_state'] == 't2_won':
                 bg_t1 = "#f8d7da"
                 bg_t2 = "#d4edda"
             else:
-                # Aktives Team leicht blau hinterlegen (Kein "Ballbesitz" Text mehr nötig)
                 if live['possession'] == 1: bg_t1 = "#e6f0fa"
                 elif live['possession'] == 2: bg_t2 = "#e6f0fa"
 
@@ -313,6 +307,12 @@ with tab2:
             elif live['balls_back']: 
                 st.success("🔥 BALLS BACK! Nochmal werfen.")
 
+            # --- SICHERE PROZENTBERECHNUNG VOR DEM F-STRING ---
+            pct_p1 = get_pct(live['stats'][f'p{i_p1}_h'], live['stats'][f'p{i_p1}_t'])
+            pct_p2 = get_pct(live['stats'][f'p{i_p2}_h'], live['stats'][f'p{i_p2}_t'])
+            pct_p3 = get_pct(live['stats'][f'p{i_p3}_h'], live['stats'][f'p{i_p3}_t'])
+            pct_p4 = get_pct(live['stats'][f'p{i_p4}_h'], live['stats'][f'p{i_p4}_t'])
+
             # --- BECHER ANZEIGE ---
             disp1, disp_vs, disp2 = st.columns([5, 1, 5])
             
@@ -322,7 +322,7 @@ with tab2:
                             f"<span style='font-size: 55px; font-weight: bold;'>{live['t1_cups']}</span><span style='font-size: 16px;'> Becher</span></div>"
                             f"<p style='text-align:center; color:gray; font-size:14px; margin:0;'>{'🏁 Starter' if live['starter']==1 else '🛡️ Hat Nachwurf'} | Zug: {live['stats']['turns_t1']}</p>"
                             f"<h3 style='text-align: center; margin-bottom:5px;'>{'👑 ' if live['game_state']=='t1_won' else ''}{p1} & {p2}</h3>"
-                            f"<p style='text-align:center; font-size:14px; margin:0;'>{p1}: {live['stats'][f'p{i_p1}_h']} ({get_pct(live['stats'][f'p{i_p1}_h'], live['stats'][f'p{i_p1}_t'])}%) | {p2}: {live['stats'][f'p{i_p2}_h']} ({get_pct(live['stats'][f'p{i_p2}_h'], live['stats'][f'p{i_p2}_t'])}%)</p>"
+                            f"<p style='text-align:center; font-size:14px; margin:0;'>{p1}: {live['stats'][f'p{i_p1}_h']} ({pct_p1}%) | {p2}: {live['stats'][f'p{i_p2}_h']} ({pct_p2}%)</p>"
                             f"</div>", unsafe_allow_html=True)
 
             with disp_vs:
@@ -334,14 +334,13 @@ with tab2:
                             f"<span style='font-size: 55px; font-weight: bold;'>{live['t2_cups']}</span><span style='font-size: 16px;'> Becher</span></div>"
                             f"<p style='text-align:center; color:gray; font-size:14px; margin:0;'>{'🏁 Starter' if live['starter']==2 else '🛡️ Hat Nachwurf'} | Zug: {live['stats']['turns_t2']}</p>"
                             f"<h3 style='text-align: center; margin-bottom:5px;'>{'👑 ' if live['game_state']=='t2_won' else ''}{p3} & {p4}</h3>"
-                            f"<p style='text-align:center; font-size:14px; margin:0;'>{p3}: {live['stats'][f'p{i_p3}_h']} ({get_pct(live['stats'][f'p{i_p3}_h'], live['stats'][f'p{i_p3}_t'])}%) | {p4}: {live['stats'][f'p{i_p4}_h']} ({get_pct(live['stats'][f'p{i_p4}_h'], live['stats'][f'p{i_p4}_t'])}%)</p>"
+                            f"<p style='text-align:center; font-size:14px; margin:0;'>{p3}: {live['stats'][f'p{i_p3}_h']} ({pct_p3}%) | {p4}: {live['stats'][f'p{i_p4}_h']} ({pct_p4}%)</p>"
                             f"</div>", unsafe_allow_html=True)
 
             st.write("---")
 
             # --- STEUERUNG (Nur wenn Spiel noch läuft) ---
             if live['game_state'] == 'playing':
-                # 0. FEHLER ABFRAGE
                 if live.get('pending_penalty'):
                     team = live['pending_penalty']
                     st.warning(f"⚠️ Wer aus Team {team} hat den Fehler begangen?")
@@ -353,7 +352,6 @@ with tab2:
                         if c_f1.button(f"Schuld war {p3}", use_container_width=True): do_penalty(2, i_p3); st.rerun()
                         if c_f2.button(f"Schuld war {p4}", use_container_width=True): do_penalty(2, i_p4); st.rerun()
 
-                # 1. PENDING BOMB
                 elif live.get('pending_bomb', False):
                     st.warning("💣 DREIFACHTREFFER! Welcher Spieler hat den ZWEITEN Ball versenkt?")
                     bp1, bp2 = st.columns(2)
@@ -365,19 +363,17 @@ with tab2:
                         if bp1.button(f"{p3} hat nachgeworfen", use_container_width=True): do_hit(2, 3, hits=[i_p3, i_p4], bombe_thrower=i_p3, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
                         if bp2.button(f"{p4} hat nachgeworfen", use_container_width=True): do_hit(2, 3, hits=[i_p3, i_p4], bombe_thrower=i_p4, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
                 
-                # 2. PENDING DOUBLE WIN
                 elif live.get('pending_double_win', False):
-                    st.warning("✌️ Doppeltreffer zum Sieg! Wer hat den ZWEITEN Becher (Game Winner) getroffen?")
+                    st.warning("✌️ Doppeltreffer zum Sieg! Wer hat den ZWEITEN Becher getroffen?")
                     cw1, cw2 = st.columns(2)
                     is_n = bool(live['nachwurf'] or live.get('single_nachwurf_team'))
                     if live['bomb_team'] == 1: 
-                        if cw1.button(f"{p1} war der Letzte", use_container_width=True): do_hit(1, 2, hits=[i_p2, i_p1], misses=[], is_clutch_nachwurf=is_n); live['pending_double_win'] = False; st.rerun() # Letzter Eintrag in hits-Liste ist der Scorer
+                        if cw1.button(f"{p1} war der Letzte", use_container_width=True): do_hit(1, 2, hits=[i_p2, i_p1], misses=[], is_clutch_nachwurf=is_n); live['pending_double_win'] = False; st.rerun()
                         if cw2.button(f"{p2} war der Letzte", use_container_width=True): do_hit(1, 2, hits=[i_p1, i_p2], misses=[], is_clutch_nachwurf=is_n); live['pending_double_win'] = False; st.rerun()
                     else:
                         if cw1.button(f"{p3} war der Letzte", use_container_width=True): do_hit(2, 2, hits=[i_p4, i_p3], misses=[], is_clutch_nachwurf=is_n); live['pending_double_win'] = False; st.rerun()
                         if cw2.button(f"{p4} war der Letzte", use_container_width=True): do_hit(2, 2, hits=[i_p3, i_p4], misses=[], is_clutch_nachwurf=is_n); live['pending_double_win'] = False; st.rerun()
 
-                # 3. PENDING LAST CUP (1st or 2nd Throw?)
                 elif live.get('pending_last_cup', False):
                     st.warning("🏆 Letzter Treffer! In welchem Wurf wurde der Becher getroffen?")
                     c_w1, c_w2 = st.columns(2)
@@ -396,7 +392,6 @@ with tab2:
                         do_hit(team, 1, hits=[hitter_idx], misses=[partner_idx], is_clutch_nachwurf=is_n) 
                         live['pending_last_cup'] = False; st.rerun()
 
-                # 4. EINZEL-NACHWURF LOGIK
                 elif live.get('single_nachwurf_team') == 1 and live['possession'] == 1:
                     if live.get('single_nachwurf_shooter') is None:
                         st.warning("🚨 Euer Team hat nur EINEN EINZIGEN Nachwurf! Wer wirft?")
@@ -423,10 +418,8 @@ with tab2:
                         if snc1.button("🎯 Treffer!", use_container_width=True): do_hit(2, 1, hits=[shooter_idx], misses=[], is_clutch_nachwurf=True); st.rerun()
                         if snc2.button("🚫 Verfehlt (Verloren)", use_container_width=True): do_miss_single(2, shooter_idx); st.rerun()
 
-                # 5. NORMALE STEUERUNG
                 else:
                     colL, colR = st.columns(2)
-                    # TEAM 1
                     with colL:
                         if live['possession'] == 1:
                             st.button("🚫 Kein Treffer (Wechsel)", use_container_width=True, on_click=lambda: do_miss(1))
@@ -449,7 +442,6 @@ with tab2:
                         st.write("")
                         if st.button("⚠️ Fehler Team 1", use_container_width=True): save_step(); live['pending_penalty'] = 1; st.rerun()
 
-                    # TEAM 2
                     with colR:
                         if live['possession'] == 2:
                             st.button("🚫 Kein Treffer (Wechsel)", use_container_width=True, on_click=lambda: do_miss(2))
@@ -472,13 +464,13 @@ with tab2:
                         st.write("")
                         if st.button("⚠️ Fehler Team 2", use_container_width=True): save_step(); live['pending_penalty'] = 2; st.rerun()
 
-            # --- KONTROLL-LEISTE ---
             st.write("---")
+            # --- KONTROLL-LEISTE ---
             ctrl1, ctrl2, ctrl3 = st.columns(3)
             with ctrl1:
                 if st.button("↩️ Undo", use_container_width=True, disabled=not live['history']):
                     last = live['history'].pop()
-                    live.update(last) # Stellt den exakten vorherigen Stand wieder her
+                    live.update(last)
                     st.rerun()
                     
             with ctrl2:
@@ -510,7 +502,6 @@ with tab2:
                 elif live['game_state'] == 'overtime_pending':
                     if st.button("🔄 Verlängerung starten", use_container_width=True, type="primary"):
                         log_action("🔄 Verlängerung gestartet!")
-                        # Setzt auf vorherigen Stand zurück + Overtime Flags anpassen (kann man später komplexer machen)
                         live['t1_cups'], live['t2_cups'], live['nachwurf'] = 3, 3, None 
                         live['single_nachwurf_team'] = None
                         live['game_state'] = 'playing'
@@ -591,7 +582,7 @@ with tab3:
         p3, p4 = players[m['t2_p1']], players[m['t2_p2']]
         
         if m['t1_score'] is not None:
-            if m['t1_score'] > m['t2_score']: t1_c, t2_c = "#198754", "#dc3545" # Grün, Rot
+            if m['t1_score'] > m['t2_score']: t1_c, t2_c = "#198754", "#dc3545"
             elif m['t2_score'] > m['t1_score']: t1_c, t2_c = "#dc3545", "#198754"
             else: t1_c, t2_c = "inherit", "inherit"
             
@@ -611,7 +602,7 @@ with tab3:
 
 # --- TAB 4: STATISTIKEN ---
 with tab4:
-    st.subheader("📊 Einzel-Statistiken")
+    st.subheader("📊 Einzel- & Event-Statistiken")
     
     ind_stats = []
     bombs_list = []
@@ -627,7 +618,6 @@ with tab4:
                 fehler += m['stats'].get(f'p{i}_f', 0)
                 if m.get('last_scorer') == i: gw += 1
                 
-                # Ereignisse sammeln
                 for b in m.get('bombs_events', []):
                     if b == i: bombs_list.append({'NAME': p, 'SPIEL': f"Spiel {m['id']+1}"})
                 for c in m.get('clutch_nachwurf_events', []):
@@ -662,7 +652,7 @@ with tab4:
         else: st.caption("Noch kein Ereignis.")
             
     with col_e2:
-        st.write("**🚑 Kupplungs-Nachwurf (Rettung)**")
+        st.write("**🚑 Nachwurf Retter**")
         if clutch_list: st.dataframe(pd.DataFrame(clutch_list), hide_index=True, use_container_width=True)
         else: st.caption("Noch kein Ereignis.")
             
@@ -672,3 +662,37 @@ with tab4:
             df_dk = pd.DataFrame(dummkopf_list).sort_values(by='FEHLER', ascending=False).reset_index(drop=True)
             st.dataframe(df_dk, hide_index=True, use_container_width=True)
         else: st.caption("Noch kein Fehler begangen.")
+
+    st.divider()
+    
+    # SPIEL-STATISTIKEN (Höchste Siege & Schnellste Siege)
+    match_data = []
+    for m in st.session_state.matches:
+        if m['t1_score'] is not None:
+            diff = abs(m['t1_score'] - m['t2_score'])
+            turns = m.get('winner_turns', 0)
+            txt = f"Spiel {m['id']+1}: {players[m['t1_p1']]} & {players[m['t1_p2']]} vs {players[m['t2_p1']]} & {players[m['t2_p2']]}"
+            res = f"{m['t1_score']} : {m['t2_score']}"
+            match_data.append({'SPIEL': txt, 'ERGEBNIS': res, 'DIFF': diff, 'ZÜGE (SIEGER)': turns})
+
+    col_m1, col_m2 = st.columns(2)
+    
+    with col_m1:
+        st.write("**🏆 Höchster Sieg (Top 3)**")
+        if match_data:
+            df_hs = pd.DataFrame(match_data).sort_values(by=['DIFF', 'ZÜGE (SIEGER)'], ascending=[False, True]).head(3).reset_index(drop=True)
+            df_hs.index += 1
+            df_hs.insert(0, 'RANG', df_hs.index)
+            st.dataframe(df_hs[['RANG', 'SPIEL', 'ERGEBNIS', 'DIFF', 'ZÜGE (SIEGER)']], hide_index=True, use_container_width=True)
+        else:
+            st.caption("Noch keine Spiele absolviert.")
+
+    with col_m2:
+        st.write("**⚡ Schnellste Siege (Blitzkrieg - Top 3)**")
+        if match_data:
+            df_bk = pd.DataFrame(match_data).sort_values(by='ZÜGE (SIEGER)', ascending=True).head(3).reset_index(drop=True)
+            df_bk.index += 1
+            df_bk.insert(0, 'RANG', df_bk.index)
+            st.dataframe(df_bk[['RANG', 'SPIEL', 'ZÜGE (SIEGER)', 'ERGEBNIS']], hide_index=True, use_container_width=True)
+        else:
+            st.caption("Noch keine Spiele absolviert.")
