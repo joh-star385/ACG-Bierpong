@@ -6,6 +6,13 @@ import time
 from datetime import date
 import io
 
+# Optionales Auto-Refresh für Zuschauer
+try:
+    from streamlit_autorefresh import st_autorefresh
+    has_autorefresh = True
+except ImportError:
+    has_autorefresh = False
+
 # --- FIREBASE SETUP ---
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -34,17 +41,15 @@ def get_pct(hits, throws):
     return int((hits / throws) * 100) if throws > 0 else 0
 
 def get_tournament_list():
-    """Holt eine Liste aller Turniere aus der Datenbank"""
     if db_connected:
         try:
             docs = db.collection('bierpong_turniere').stream()
             return {doc.id: doc.to_dict().get("t_name", "Unbekanntes Turnier") for doc in docs}
-        except Exception as e:
-            st.sidebar.error("Konnte Turnierliste nicht laden.")
+        except Exception:
+            pass
     return {}
 
 def load_tournament(doc_id):
-    """Lädt ein spezifisches Turnier in den Session State"""
     if db_connected:
         doc = db.collection('bierpong_turniere').document(doc_id).get()
         if doc.exists:
@@ -57,7 +62,6 @@ def load_tournament(doc_id):
             st.session_state.live = data.get("live", None)
 
 def sync_to_cloud():
-    """Speichert den aktuellen Stand unter der aktuellen Turnier-ID"""
     if db_connected and st.session_state.current_tournament_id:
         doc_ref = db.collection('bierpong_turniere').document(st.session_state.current_tournament_id)
         data = {
@@ -85,7 +89,7 @@ def generate_fresh_matches():
         for i, g in enumerate(games_logic)
     ]
 
-# 2. Session State initialisieren (falls leer)
+# 2. Session State initialisieren
 if 'current_tournament_id' not in st.session_state: st.session_state.current_tournament_id = None
 if 't_name' not in st.session_state: st.session_state.t_name = "Bierpong Meisterschaft"
 if 't_date' not in st.session_state: st.session_state.t_date = str(date.today())
@@ -93,6 +97,7 @@ if 'players' not in st.session_state: st.session_state.players = ['Spieler 1', '
 if 'matches' not in st.session_state: st.session_state.matches = generate_fresh_matches()
 if 'live' not in st.session_state: st.session_state.live = None
 if 'confirm_abort' not in st.session_state: st.session_state.confirm_abort = False
+if 'confirm_delete' not in st.session_state: st.session_state.confirm_delete = None
 if 'admin_auth' not in st.session_state: st.session_state.admin_auth = False
 
 def get_basic_standings():
@@ -124,13 +129,18 @@ with st.sidebar:
             st.rerun()
             
         st.write("---")
-        st.write("**Welches Turnier möchtest du sehen?**")
+        st.write("**Aktuelles Turnier:**")
         all_t = get_tournament_list()
         if all_t:
             sel_view = st.selectbox("Turnier auswählen", options=list(all_t.keys()), format_func=lambda x: all_t[x])
-            if st.button("🔄 Turnier laden / Aktualisieren", use_container_width=True):
+            if st.button("🔄 Manuell Aktualisieren", use_container_width=True):
                 load_tournament(sel_view)
                 st.rerun()
+                
+            # AUTO-REFRESH FÜR ZUSCHAUER (Alle 5 Sekunden)
+            if has_autorefresh and st.session_state.current_tournament_id == sel_view:
+                st_autorefresh(interval=5000, limit=None, key="viewer_refresh")
+                load_tournament(sel_view) # Zieht im Hintergrund immer die neuesten Daten
         else:
             st.caption("Keine Turniere gefunden.")
             
@@ -160,7 +170,8 @@ def save_step():
         'single_nachwurf_team': l.get('single_nachwurf_team', None),
         'single_nachwurf_shooter': l.get('single_nachwurf_shooter', None),
         'last_cup_hitter': l.get('last_cup_hitter', None),
-        'last_scorer': l.get('last_scorer', None),
+        't1_last_scorer': l.get('t1_last_scorer', None),
+        't2_last_scorer': l.get('t2_last_scorer', None),
         'game_state': l.get('game_state', 'playing'),
         'cups_at_turn_start': l.get('cups_at_turn_start'),
         'stats': l['stats'], 'action_log': l['action_log'],
@@ -169,13 +180,18 @@ def save_step():
 
 def check_game_over():
     l = st.session_state.live
-    if l['t1_cups'] == 0 and l['t2_cups'] == 0: l['game_state'] = 'nachwurf_erfolgreich'
+    if l['t1_cups'] == 0 and l['t2_cups'] == 0: 
+        l['game_state'] = 'nachwurf_erfolgreich'
     elif l['t1_cups'] == 0 and l['t2_cups'] > 0:
-        if l['starter'] == 1: l['game_state'] = 't2_won'
-        elif l['starter'] == 2 and l['nachwurf'] is None and l.get('single_nachwurf_team') != 1: l['game_state'] = 't2_won'
+        if l['starter'] == 1: 
+            l['game_state'] = 't2_won'
+        elif l['starter'] == 2 and l['nachwurf'] is None and l.get('single_nachwurf_team') != 1: 
+            l['game_state'] = 't2_won'
     elif l['t2_cups'] == 0 and l['t1_cups'] > 0:
-        if l['starter'] == 2: l['game_state'] = 't1_won'
-        elif l['starter'] == 1 and l['nachwurf'] is None and l.get('single_nachwurf_team') != 2: l['game_state'] = 't1_won'
+        if l['starter'] == 2: 
+            l['game_state'] = 't1_won'
+        elif l['starter'] == 1 and l['nachwurf'] is None and l.get('single_nachwurf_team') != 2: 
+            l['game_state'] = 't1_won'
 
 def change_possession(new_poss):
     live = st.session_state.live
@@ -198,25 +214,34 @@ def do_hit(team_hitting, amount, hits=[], misses=[], bombe_thrower=None, is_ball
     t_name = f"{names[m['t1_p1']]} & {names[m['t1_p2']]}" if team_hitting == 1 else f"{names[m['t2_p1']]} & {names[m['t2_p2']]}"
     turn = live['stats'][f'turns_t{team_hitting}']
     
-    if amount == 1: log_action(f"[{t_name} | Zug {turn}] 🎯 Einzeltreffer von {names[hits[0]]}")
-    elif amount == 2: log_action(f"[{t_name} | Zug {turn}] ✌️ Doppeltreffer von {names[hits[0]]} & {names[hits[1]]}")
-    elif amount == 3: 
-        log_action(f"[{t_name} | Zug {turn}] 💣 Dreifachtreffer! Zweiter Ball von {names[bombe_thrower]}")
-        live['bombs_events'].append(bombe_thrower)
-
-    if bombe_thrower is not None: live['last_scorer'] = bombe_thrower
-    elif hits: live['last_scorer'] = hits[-1]
+    # Vollstrecker heimlich vormerken
+    scorer = bombe_thrower if bombe_thrower is not None else (hits[-1] if hits else None)
+    if scorer is not None:
+        if team_hitting == 1: live['t1_last_scorer'] = scorer
+        else: live['t2_last_scorer'] = scorer
         
     if team_hitting == 1: live['t2_cups'] = max(0, live['t2_cups'] - amount)
     else: live['t1_cups'] = max(0, live['t1_cups'] - amount)
     
+    # Log mit Spielstand
+    s_txt = f"(Stand: {live['t1_cups']}:{live['t2_cups']})"
+    if amount == 1: log_action(f"[{t_name} | Zug {turn}] 🎯 Einzeltreffer von {names[hits[0]]} {s_txt}")
+    elif amount == 2: log_action(f"[{t_name} | Zug {turn}] ✌️ Doppeltreffer von {names[hits[0]]} & {names[hits[1]]} {s_txt}")
+    elif amount == 3: 
+        log_action(f"[{t_name} | Zug {turn}] 💣 Dreifachtreffer! Zweiter Ball von {names[bombe_thrower]} {s_txt}")
+        live['bombs_events'].append(bombe_thrower)
+
     if is_clutch_nachwurf and ((team_hitting == 1 and live['t2_cups'] == 0) or (team_hitting == 2 and live['t1_cups'] == 0)):
-        live['clutch_nachwurf_events'].append(live['last_scorer'])
+        live['clutch_nachwurf_events'].append(scorer)
     
     for p in hits: live['stats'][f'p{p}_h'] += 1; live['stats'][f'p{p}_t'] += 1
     for p in misses: live['stats'][f'p{p}_t'] += 1
         
-    if not is_balls_back: change_possession(2 if team_hitting == 1 else 1)
+    if not is_balls_back: 
+        change_possession(2 if team_hitting == 1 else 1)
+        # Wenn wir im Nachwurf waren und Ballbesitz wechselt -> Nachwurf ist beendet!
+        if live.get('nachwurf') == team_hitting: live['nachwurf'] = None
+        if live.get('single_nachwurf_team') == team_hitting: live['single_nachwurf_team'] = None
         
     if live['t2_cups'] == 0 and live['starter'] == 1 and live['nachwurf'] is None and live.get('single_nachwurf_team') != 2:
         live['nachwurf'] = 2; change_possession(2)
@@ -237,7 +262,9 @@ def do_miss(team):
     t_name = f"{names[m['t1_p1']]} & {names[m['t1_p2']]}" if team == 1 else f"{names[m['t2_p1']]} & {names[m['t2_p2']]}"
     turn = live['stats'][f'turns_t{team}']
     
-    log_action(f"[{t_name} | Zug {turn}] 🚫 Kein Treffer")
+    s_txt = f"(Stand: {live['t1_cups']}:{live['t2_cups']})"
+    log_action(f"[{t_name} | Zug {turn}] 🚫 Kein Treffer {s_txt}")
+    
     if team == 1:
         live['stats'][f"p{m['t1_p1']}_t"] += 1; live['stats'][f"p{m['t1_p2']}_t"] += 1
         change_possession(2)
@@ -245,7 +272,7 @@ def do_miss(team):
         live['stats'][f"p{m['t2_p1']}_t"] += 1; live['stats'][f"p{m['t2_p2']}_t"] += 1
         change_possession(1)
         
-    if live['nachwurf'] == team: live['nachwurf'] = None
+    if live.get('nachwurf') == team: live['nachwurf'] = None
     check_game_over()
     sync_to_cloud()
 
@@ -256,8 +283,10 @@ def do_miss_single(team, shooter_idx):
     names = st.session_state.players
     turn = live['stats'][f'turns_t{team}']
     
-    log_action(f"[Team {team} | Zug {turn}] 🚫 Nachwurf verfehlt von {names[shooter_idx]}")
+    s_txt = f"(Stand: {live['t1_cups']}:{live['t2_cups']})"
+    log_action(f"[Team {team} | Zug {turn}] 🚫 Nachwurf verfehlt von {names[shooter_idx]} {s_txt}")
     live['stats'][f"p{shooter_idx}_t"] += 1
+    
     live['single_nachwurf_team'] = None 
     change_possession(2 if team == 1 else 1)
     check_game_over()
@@ -269,9 +298,11 @@ def do_penalty(team, culprit_idx):
     names = st.session_state.players
     turn = live['stats'][f'turns_t{team}']
     
-    log_action(f"[Team {team} | Zug {turn}] ⚠️ Fehler von {names[culprit_idx]} (-1 Becher)")
     if team == 1: live['t1_cups'] = max(0, live['t1_cups'] - 1)
     else: live['t2_cups'] = max(0, live['t2_cups'] - 1)
+    
+    s_txt = f"(Stand: {live['t1_cups']}:{live['t2_cups']})"
+    log_action(f"[Team {team} | Zug {turn}] ⚠️ Fehler von {names[culprit_idx]} (-1 Becher) {s_txt}")
     
     live['stats'][f'p{culprit_idx}_f'] += 1
     live['pending_penalty'] = None
@@ -299,7 +330,7 @@ if st.session_state.admin_auth:
             with col_l1:
                 sel_load = st.selectbox("Wähle ein Turnier aus der Datenbank:", options=list(all_t.keys()), format_func=lambda x: all_t[x])
             with col_l2:
-                st.write("") # Spacer
+                st.write("") 
                 st.write("")
                 if st.button("📂 Turnier laden", use_container_width=True):
                     load_tournament(sel_load)
@@ -323,7 +354,6 @@ if st.session_state.admin_auth:
                 new_p.append(st.text_input(f"Slot {i+1}", value=f"Spieler {i+1}", key=f"new_p{i}"))
                 
         if st.button("🆕 Neues Turnier erstellen & speichern", type="primary"):
-            # Generiere eine eindeutige ID aus Timestamp
             new_id = f"turnier_{int(time.time())}"
             st.session_state.current_tournament_id = new_id
             st.session_state.t_name = new_name
@@ -334,6 +364,36 @@ if st.session_state.admin_auth:
             sync_to_cloud()
             st.success(f"Turnier '{new_name}' erfolgreich erstellt! Du kannst jetzt zu 'Live Spiel' wechseln.")
             st.rerun()
+
+        st.divider()
+        
+        # BEREICH C: Turnier löschen
+        st.write("**🗑️ Turnier löschen**")
+        if all_t:
+            col_d1, col_d2 = st.columns([3, 1])
+            with col_d1:
+                sel_del = st.selectbox("Welches Turnier soll gelöscht werden?", options=list(all_t.keys()), format_func=lambda x: all_t[x], key="del_box")
+            with col_d2:
+                st.write("")
+                st.write("")
+                if st.button("🗑️ Löschen", use_container_width=True):
+                    st.session_state.confirm_delete = sel_del
+                    st.rerun()
+
+            if st.session_state.confirm_delete == sel_del:
+                st.error(f"⚠️ Bist du sicher, dass '{all_t[sel_del]}' unwiderruflich gelöscht werden soll?")
+                cd1, cd2 = st.columns(2)
+                if cd1.button("✔️ Ja, endgültig löschen", type="primary", use_container_width=True):
+                    if db_connected:
+                        db.collection('bierpong_turniere').document(sel_del).delete()
+                        st.session_state.confirm_delete = None
+                        if st.session_state.current_tournament_id == sel_del:
+                            st.session_state.current_tournament_id = None
+                        st.success("Turnier erfolgreich gelöscht.")
+                        st.rerun()
+                if cd2.button("❌ Abbrechen", use_container_width=True):
+                    st.session_state.confirm_delete = None
+                    st.rerun()
 
     # --- TAB 2: LIVE SPIEL ---
     with tab2:
@@ -376,6 +436,7 @@ if st.session_state.admin_auth:
                         'balls_back': False, 'pending_bomb': False, 'bomb_team': None,
                         'pending_double_win': False, 'pending_last_cup': False, 'pending_penalty': None,
                         'single_nachwurf_team': None, 'single_nachwurf_shooter': None, 'last_cup_hitter': None,
+                        't1_last_scorer': None, 't2_last_scorer': None,
                         'last_scorer': None, 'action_log': [], 'history': [], 'game_state': 'playing',
                         'cups_at_turn_start': {'t1_cups': 10, 't2_cups': 10},
                         'bombs_events': [], 'clutch_nachwurf_events': [],
@@ -476,11 +537,11 @@ if st.session_state.admin_auth:
                         bp1, bp2 = st.columns(2)
                         is_n = bool(live['nachwurf'] or live.get('single_nachwurf_team'))
                         if live['bomb_team'] == 1:
-                            if bp1.button(f"{p1} hat nachgeworfen", use_container_width=True): do_hit(1, 3, hits=[i_p1, i_p2], bombe_thrower=i_p1, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
-                            if bp2.button(f"{p2} hat nachgeworfen", use_container_width=True): do_hit(1, 3, hits=[i_p1, i_p2], bombe_thrower=i_p2, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
+                            if bp1.button(f"{p1}", use_container_width=True): do_hit(1, 3, hits=[i_p1, i_p2], bombe_thrower=i_p1, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
+                            if bp2.button(f"{p2}", use_container_width=True): do_hit(1, 3, hits=[i_p1, i_p2], bombe_thrower=i_p2, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
                         else:
-                            if bp1.button(f"{p3} hat nachgeworfen", use_container_width=True): do_hit(2, 3, hits=[i_p3, i_p4], bombe_thrower=i_p3, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
-                            if bp2.button(f"{p4} hat nachgeworfen", use_container_width=True): do_hit(2, 3, hits=[i_p3, i_p4], bombe_thrower=i_p4, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
+                            if bp1.button(f"{p3}", use_container_width=True): do_hit(2, 3, hits=[i_p3, i_p4], bombe_thrower=i_p3, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
+                            if bp2.button(f"{p4}", use_container_width=True): do_hit(2, 3, hits=[i_p3, i_p4], bombe_thrower=i_p4, is_balls_back=not is_n, is_clutch_nachwurf=is_n); live['pending_bomb'] = False; st.rerun()
                     
                     elif live.get('pending_double_win', False):
                         st.warning("✌️ Doppeltreffer zum Sieg! Wer hat den ZWEITEN Becher getroffen?")
@@ -608,13 +669,17 @@ if st.session_state.admin_auth:
                             m['t1_score'] = live['t1_cups']
                             m['t2_score'] = live['t2_cups']
                             m['stats'] = copy.deepcopy(live['stats'])
-                            m['last_scorer'] = live.get('last_scorer', None)
+                            
+                            # Den exakten Vollstrecker speichern
+                            if live['game_state'] == 't1_won': m['last_scorer'] = live.get('t1_last_scorer')
+                            else: m['last_scorer'] = live.get('t2_last_scorer')
+                            
                             m['action_log'] = copy.deepcopy(live['action_log'])
                             m['bombs_events'] = copy.deepcopy(live['bombs_events'])
                             m['clutch_nachwurf_events'] = copy.deepcopy(live['clutch_nachwurf_events'])
                             
-                            if live['t1_cups'] == 0: m['winner_turns'] = live['stats']['turns_t2'] 
-                            else: m['winner_turns'] = live['stats']['turns_t1']
+                            if live['game_state'] == 't1_won': m['winner_turns'] = live['stats']['turns_t1'] 
+                            else: m['winner_turns'] = live['stats']['turns_t2']
                             
                             m['live_backup'] = copy.deepcopy(live)
                             st.session_state.live = None
@@ -705,6 +770,7 @@ with tab3:
     st.divider()
     st.subheader("📅 Spielplan")
     
+    match_export = [] # Für Excel speichern wir das gleich mit ab
     for m in matches:
         p1, p2 = players[m['t1_p1']], players[m['t1_p2']]
         p3, p4 = players[m['t2_p1']], players[m['t2_p2']]
@@ -714,74 +780,4 @@ with tab3:
             elif m['t2_score'] > m['t1_score']: t1_c, t2_c = "#dc3545", "#198754"
             else: t1_c, t2_c = "inherit", "inherit"
             
-            st.markdown(f"<div style='padding:10px; background-color:#f8f9fa; border-radius:5px; margin-bottom:5px; text-align:center; font-size:16px;'>"
-                        f"<b>Spiel {m['id']+1}:</b> &nbsp;&nbsp;&nbsp; <span style='color:{t1_c}; font-weight:bold;'>{p1} & {p2}</span> "
-                        f"&nbsp;&nbsp;&nbsp;<b>{m['t1_score']} : {m['t2_score']}</b>&nbsp;&nbsp;&nbsp; "
-                        f"<span style='color:{t2_c}; font-weight:bold;'>{p3} & {p4}</span></div>", 
-                        unsafe_allow_html=True)
-            with st.expander("📄 Spielbericht anzeigen"):
-                if m.get('action_log'):
-                    for entry in m['action_log']: st.caption(entry)
-                else: st.caption("Kein Log vorhanden")
-        elif st.session_state.live and st.session_state.live['match_id'] == m['id']:
-            st.warning(f"🔴 LÄUFT GERADE: Spiel {m['id']+1} | {p1} & {p2} VS {p3} & {p4}")
-        else:
-            st.write(f"⚪ Spiel {m['id']+1} | {p1} & {p2} VS {p3} & {p4}")
-
-# --- TAB 4: STATISTIKEN & EXCEL EXPORT ---
-with tab4:
-    st.subheader("📊 Einzel- & Event-Statistiken")
-    
-    ind_stats = []
-    bombs_list = []
-    clutch_list = []
-    dummkopf_list = []
-    
-    for i, p in enumerate(st.session_state.players):
-        hits = throws = gw = fehler = bombs = clutch = 0
-        for m in st.session_state.matches:
-            if m['t1_score'] is not None and m['stats'] is not None:
-                hits += m['stats'].get(f'p{i}_h', 0)
-                throws += m['stats'].get(f'p{i}_t', 0)
-                fehler += m['stats'].get(f'p{i}_f', 0)
-                if m.get('last_scorer') == i: gw += 1
-                bombs += sum(1 for b in m.get('bombs_events', []) if b == i)
-                clutch += sum(1 for c in m.get('clutch_nachwurf_events', []) if c == i)
-        
-        quote = (hits / throws * 100) if throws > 0 else 0.0
-        ind_stats.append({
-            'NAME': p, 'TREFFER': hits, 'WÜRFE': throws, 'QUOTE_VAL': quote, 'QUOTE': f"{quote:.2f} %", 
-            'SIEGTREFFER': gw, 'DREIFACHBECHER-TREFFER': bombs, 'NACHWURF RETTER': clutch, 'FEHLER': fehler
-        })
-    
-    df_ind = pd.DataFrame(ind_stats)
-    
-    c_s1, c_s2 = st.columns(2)
-    with c_s1:
-        st.write("**🎯 Trefferquoten**")
-        df_quote = df_ind.sort_values(by=['QUOTE_VAL', 'TREFFER'], ascending=[False, False]).reset_index(drop=True)
-        df_quote.index += 1
-        df_quote.insert(0, 'RANG', df_quote.index)
-        st.dataframe(df_quote[['RANG', 'NAME', 'TREFFER', 'WÜRFE', 'QUOTE']], hide_index=True, use_container_width=True)
-
-    with c_s2:
-        st.write("**🔪 Vollstrecker (Game Winners)**")
-        df_gw = df_ind.sort_values(by='SIEGTREFFER', ascending=False).reset_index(drop=True)
-        df_gw.index += 1
-        df_gw.insert(0, 'RANG', df_gw.index)
-        st.dataframe(df_gw[['RANG', 'NAME', 'SIEGTREFFER']], hide_index=True, use_container_width=True)
-
-    st.write("---")
-    col_e1, col_e2, col_e3 = st.columns(3)
-    
-    with col_e1:
-        st.write("**💣 Dreifachbecher-Treffer**")
-        df_bomb = df_ind[df_ind['DREIFACHBECHER-TREFFER'] > 0].sort_values(by='DREIFACHBECHER-TREFFER', ascending=False).reset_index(drop=True)
-        if not df_bomb.empty:
-            df_bomb.index += 1
-            df_bomb.insert(0, 'RANG', df_bomb.index)
-            st.dataframe(df_bomb[['RANG', 'NAME', 'DREIFACHBECHER-TREFFER']], hide_index=True, use_container_width=True)
-        else: st.caption("Noch kein Ereignis.")
-            
-    with col_e2:
-        st.write("**🚑 Nachwurf Retter**")
+            match_export.append({'Spiel': f"Spiel {m['id']+1
