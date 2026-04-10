@@ -98,7 +98,13 @@ if 'matches' not in st.session_state: st.session_state.matches = generate_fresh_
 if 'live' not in st.session_state: st.session_state.live = None
 if 'confirm_abort' not in st.session_state: st.session_state.confirm_abort = False
 if 'confirm_delete' not in st.session_state: st.session_state.confirm_delete = None
-if 'admin_auth' not in st.session_state: st.session_state.admin_auth = False
+
+# NEU: Überprüfe die URL nach dem "admin" Parameter für einen dauerhaften Login
+if 'admin_auth' not in st.session_state:
+    if st.query_params.get("admin") == "true":
+        st.session_state.admin_auth = True
+    else:
+        st.session_state.admin_auth = False
 
 def get_basic_standings():
     stats = []
@@ -119,13 +125,14 @@ def get_basic_standings():
     df.insert(0, 'RANG', df.index)
     return df[['RANG', 'NAME', 'S', 'N']]
 
-# --- ZUSCHAUER / MASTER LOGIK ---
+# --- ZUSCHAUER / MASTER LOGIK IN DER SIDEBAR ---
 with st.sidebar:
     if not st.session_state.admin_auth:
         st.header("👀 Zuschauer-Modus")
         pwd = st.text_input("🔒 Admin Passwort:", type="password")
         if pwd == "acg987":
             st.session_state.admin_auth = True
+            st.query_params["admin"] = "true" # Dauerhafter Login via URL!
             st.rerun()
             
         st.write("---")
@@ -137,10 +144,9 @@ with st.sidebar:
                 load_tournament(sel_view)
                 st.rerun()
                 
-            # AUTO-REFRESH FÜR ZUSCHAUER (Alle 5 Sekunden)
             if has_autorefresh and st.session_state.current_tournament_id == sel_view:
                 st_autorefresh(interval=5000, limit=None, key="viewer_refresh")
-                load_tournament(sel_view) # Zieht im Hintergrund immer die neuesten Daten
+                load_tournament(sel_view)
         else:
             st.caption("Keine Turniere gefunden.")
             
@@ -148,6 +154,8 @@ with st.sidebar:
         st.header("👑 Master-Modus")
         if st.button("🚪 Logout (Zurück zum Zuschauer-Modus)", use_container_width=True):
             st.session_state.admin_auth = False
+            if "admin" in st.query_params:
+                del st.query_params["admin"] # Entfernt den Login aus der URL
             st.rerun()
         
     st.write("---")
@@ -183,15 +191,21 @@ def check_game_over():
     if l['t1_cups'] == 0 and l['t2_cups'] == 0: 
         l['game_state'] = 'nachwurf_erfolgreich'
     elif l['t1_cups'] == 0 and l['t2_cups'] > 0:
-        if l['starter'] == 1: 
-            l['game_state'] = 't2_won'
-        elif l['starter'] == 2 and l['nachwurf'] is None and l.get('single_nachwurf_team') != 1: 
-            l['game_state'] = 't2_won'
-    elif l['t2_cups'] == 0 and l['t1_cups'] > 0:
         if l['starter'] == 2: 
+            # Team 2 hat begonnen, Team 1 (Nachwurf) trifft auf 0. Sofortiger Sieg für Team 1!
             l['game_state'] = 't1_won'
-        elif l['starter'] == 1 and l['nachwurf'] is None and l.get('single_nachwurf_team') != 2: 
-            l['game_state'] = 't1_won'
+        elif l['starter'] == 1:
+            # Team 1 hat begonnen und ist fertig. Warten auf Nachwurf von Team 2.
+            if l['nachwurf'] is None and l.get('single_nachwurf_team') != 2: 
+                l['game_state'] = 't1_won'
+    elif l['t2_cups'] == 0 and l['t1_cups'] > 0:
+        if l['starter'] == 1: 
+            # Team 1 hat begonnen, Team 2 (Nachwurf) trifft auf 0. Sofortiger Sieg für Team 2!
+            l['game_state'] = 't2_won'
+        elif l['starter'] == 2:
+            # Team 2 hat begonnen und ist fertig. Warten auf Nachwurf von Team 1.
+            if l['nachwurf'] is None and l.get('single_nachwurf_team') != 1: 
+                l['game_state'] = 't2_won'
 
 def change_possession(new_poss):
     live = st.session_state.live
@@ -214,7 +228,7 @@ def do_hit(team_hitting, amount, hits=[], misses=[], bombe_thrower=None, is_ball
     t_name = f"{names[m['t1_p1']]} & {names[m['t1_p2']]}" if team_hitting == 1 else f"{names[m['t2_p1']]} & {names[m['t2_p2']]}"
     turn = live['stats'][f'turns_t{team_hitting}']
     
-    # Vollstrecker heimlich vormerken
+    # Vollstrecker speichern (der Schütze, der den letzten Becher trifft)
     scorer = bombe_thrower if bombe_thrower is not None else (hits[-1] if hits else None)
     if scorer is not None:
         if team_hitting == 1: live['t1_last_scorer'] = scorer
@@ -223,7 +237,6 @@ def do_hit(team_hitting, amount, hits=[], misses=[], bombe_thrower=None, is_ball
     if team_hitting == 1: live['t2_cups'] = max(0, live['t2_cups'] - amount)
     else: live['t1_cups'] = max(0, live['t1_cups'] - amount)
     
-    # Log mit Spielstand
     s_txt = f"(Stand: {live['t1_cups']}:{live['t2_cups']})"
     if amount == 1: log_action(f"[{t_name} | Zug {turn}] 🎯 Einzeltreffer von {names[hits[0]]} {s_txt}")
     elif amount == 2: log_action(f"[{t_name} | Zug {turn}] ✌️ Doppeltreffer von {names[hits[0]]} & {names[hits[1]]} {s_txt}")
@@ -239,7 +252,7 @@ def do_hit(team_hitting, amount, hits=[], misses=[], bombe_thrower=None, is_ball
         
     if not is_balls_back: 
         change_possession(2 if team_hitting == 1 else 1)
-        # Wenn wir im Nachwurf waren und Ballbesitz wechselt -> Nachwurf ist beendet!
+        # Beende den Nachwurf-Modus bei Ballwechsel
         if live.get('nachwurf') == team_hitting: live['nachwurf'] = None
         if live.get('single_nachwurf_team') == team_hitting: live['single_nachwurf_team'] = None
         
@@ -322,7 +335,6 @@ if st.session_state.admin_auth:
     with tab1:
         st.subheader("📁 Turnier-Verwaltung")
         
-        # BEREICH A: Bestehendes Turnier laden
         st.write("**Bestehendes Turnier laden**")
         all_t = get_tournament_list()
         if all_t:
@@ -341,7 +353,6 @@ if st.session_state.admin_auth:
             
         st.divider()
         
-        # BEREICH B: Neues Turnier anlegen
         st.write("**Neues Turnier anlegen**")
         c1, c2 = st.columns(2)
         with c1:
@@ -367,7 +378,6 @@ if st.session_state.admin_auth:
 
         st.divider()
         
-        # BEREICH C: Turnier löschen
         st.write("**🗑️ Turnier löschen**")
         if all_t:
             col_d1, col_d2 = st.columns([3, 1])
@@ -770,7 +780,7 @@ with tab3:
     st.divider()
     st.subheader("📅 Spielplan")
     
-    match_export = [] # Für Excel speichern wir das gleich mit ab
+    match_export = [] # Sichere Listen-Erstellung für Excel Download
     for m in matches:
         p1, p2 = players[m['t1_p1']], players[m['t1_p2']]
         p3, p4 = players[m['t2_p1']], players[m['t2_p2']]
@@ -780,4 +790,153 @@ with tab3:
             elif m['t2_score'] > m['t1_score']: t1_c, t2_c = "#dc3545", "#198754"
             else: t1_c, t2_c = "inherit", "inherit"
             
-            match_export.append({'Spiel': f"Spiel {m['id']+1
+            match_export.append({'Spiel': f"Spiel {m['id']+1}", 'Team 1': f"{p1} & {p2}", 'Team 2': f"{p3} & {p4}", 'Ergebnis': f"{m['t1_score']} : {m['t2_score']}"})
+            
+            st.markdown(f"<div style='padding:10px; background-color:#f8f9fa; border-radius:5px; margin-bottom:5px; text-align:center; font-size:16px;'>"
+                        f"<b>Spiel {m['id']+1}:</b> &nbsp;&nbsp;&nbsp; <span style='color:{t1_c}; font-weight:bold;'>{p1} & {p2}</span> "
+                        f"&nbsp;&nbsp;&nbsp;<b>{m['t1_score']} : {m['t2_score']}</b>&nbsp;&nbsp;&nbsp; "
+                        f"<span style='color:{t2_c}; font-weight:bold;'>{p3} & {p4}</span></div>", 
+                        unsafe_allow_html=True)
+            with st.expander("📄 Spielbericht anzeigen"):
+                if m.get('action_log'):
+                    for entry in m['action_log']: st.caption(entry)
+                else: st.caption("Kein Log vorhanden")
+        elif st.session_state.live and st.session_state.live['match_id'] == m['id']:
+            match_export.append({'Spiel': f"Spiel {m['id']+1}", 'Team 1': f"{p1} & {p2}", 'Team 2': f"{p3} & {p4}", 'Ergebnis': "LÄUFT GERADE"})
+            st.warning(f"🔴 LÄUFT GERADE: Spiel {m['id']+1} | {p1} & {p2} VS {p3} & {p4}")
+        else:
+            match_export.append({'Spiel': f"Spiel {m['id']+1}", 'Team 1': f"{p1} & {p2}", 'Team 2': f"{p3} & {p4}", 'Ergebnis': "- : -"})
+            st.write(f"⚪ Spiel {m['id']+1} | {p1} & {p2} VS {p3} & {p4}")
+            
+    df_matches = pd.DataFrame(match_export)
+
+# --- TAB 4: STATISTIKEN & EXCEL EXPORT ---
+with tab4:
+    st.subheader("📊 Einzel- & Event-Statistiken")
+    
+    ind_stats = []
+    for i, p in enumerate(st.session_state.players):
+        hits = throws = gw = fehler = bombs = clutch = 0
+        for m in st.session_state.matches:
+            if m['t1_score'] is not None and m['stats'] is not None:
+                hits += m['stats'].get(f'p{i}_h', 0)
+                throws += m['stats'].get(f'p{i}_t', 0)
+                fehler += m['stats'].get(f'p{i}_f', 0)
+                if m.get('last_scorer') == i: gw += 1
+                bombs += sum(1 for b in m.get('bombs_events', []) if b == i)
+                clutch += sum(1 for c in m.get('clutch_nachwurf_events', []) if c == i)
+        
+        quote = (hits / throws * 100) if throws > 0 else 0.0
+        ind_stats.append({
+            'NAME': p, 'TREFFER': hits, 'WÜRFE': throws, 'QUOTE_VAL': quote, 'QUOTE': f"{quote:.2f} %", 
+            'SIEGTREFFER': gw, 'DREIFACHBECHER-TREFFER': bombs, 'NACHWURF RETTER': clutch, 'FEHLER': fehler
+        })
+    
+    df_ind = pd.DataFrame(ind_stats)
+    
+    c_s1, c_s2 = st.columns(2)
+    with c_s1:
+        st.write("**🎯 Trefferquoten**")
+        df_quote = df_ind.sort_values(by=['QUOTE_VAL', 'TREFFER'], ascending=[False, False]).reset_index(drop=True)
+        df_quote.index += 1
+        df_quote.insert(0, 'RANG', df_quote.index)
+        st.dataframe(df_quote[['RANG', 'NAME', 'TREFFER', 'WÜRFE', 'QUOTE']], hide_index=True, use_container_width=True)
+
+    with c_s2:
+        st.write("**🔪 Vollstrecker (Game Winners)**")
+        df_gw = df_ind[df_ind['SIEGTREFFER'] > 0].sort_values(by='SIEGTREFFER', ascending=False).reset_index(drop=True)
+        if not df_gw.empty:
+            df_gw.index += 1
+            df_gw.insert(0, 'RANG', df_gw.index)
+            st.dataframe(df_gw[['RANG', 'NAME', 'SIEGTREFFER']], hide_index=True, use_container_width=True)
+        else: st.caption("Noch kein Ereignis.")
+
+    st.write("---")
+    col_e1, col_e2, col_e3 = st.columns(3)
+    
+    with col_e1:
+        st.write("**💣 Dreifachbecher-Treffer**")
+        df_bomb = df_ind[df_ind['DREIFACHBECHER-TREFFER'] > 0].sort_values(by='DREIFACHBECHER-TREFFER', ascending=False).reset_index(drop=True)
+        if not df_bomb.empty:
+            df_bomb.index += 1
+            df_bomb.insert(0, 'RANG', df_bomb.index)
+            st.dataframe(df_bomb[['RANG', 'NAME', 'DREIFACHBECHER-TREFFER']], hide_index=True, use_container_width=True)
+        else: st.caption("Noch kein Ereignis.")
+            
+    with col_e2:
+        st.write("**🚑 Nachwurf Retter**")
+        df_clutch = df_ind[df_ind['NACHWURF RETTER'] > 0].sort_values(by='NACHWURF RETTER', ascending=False).reset_index(drop=True)
+        if not df_clutch.empty:
+            df_clutch.index += 1
+            df_clutch.insert(0, 'RANG', df_clutch.index)
+            st.dataframe(df_clutch[['RANG', 'NAME', 'NACHWURF RETTER']], hide_index=True, use_container_width=True)
+        else: st.caption("Noch kein Ereignis.")
+            
+    with col_e3:
+        st.write("**🤡 Dummkopf (Fehler)**")
+        df_dk = df_ind[df_ind['FEHLER'] > 0].sort_values(by='FEHLER', ascending=False).reset_index(drop=True)
+        if not df_dk.empty:
+            df_dk.index += 1
+            df_dk.insert(0, 'RANG', df_dk.index)
+            st.dataframe(df_dk[['RANG', 'NAME', 'FEHLER']], hide_index=True, use_container_width=True)
+        else: st.caption("Noch kein Fehler begangen.")
+
+    st.divider()
+    
+    # SPIEL-STATISTIKEN
+    match_data = []
+    for m in st.session_state.matches:
+        if m['t1_score'] is not None:
+            diff = abs(m['t1_score'] - m['t2_score'])
+            turns = m.get('winner_turns', 0)
+            txt = f"Spiel {m['id']+1}: {players[m['t1_p1']]} & {players[m['t1_p2']]} vs {players[m['t2_p1']]} & {players[m['t2_p2']]}"
+            res = f"{m['t1_score']} : {m['t2_score']}"
+            match_data.append({'SPIEL': txt, 'ERGEBNIS': res, 'DIFF': diff, 'ZÜGE (SIEGER)': turns})
+
+    col_m1, col_m2 = st.columns(2)
+    
+    with col_m1:
+        st.write("**🏆 Höchster Sieg (Top 3)**")
+        if match_data:
+            df_hs = pd.DataFrame(match_data).sort_values(by=['DIFF', 'ZÜGE (SIEGER)'], ascending=[False, True]).head(3).reset_index(drop=True)
+            df_hs.index += 1
+            df_hs.insert(0, 'RANG', df_hs.index)
+            st.dataframe(df_hs[['RANG', 'SPIEL', 'ERGEBNIS', 'DIFF', 'ZÜGE (SIEGER)']], hide_index=True, use_container_width=True)
+        else:
+            st.caption("Noch keine Spiele absolviert.")
+
+    with col_m2:
+        st.write("**⚡ Schnellste Siege (Blitzkrieg - Top 3)**")
+        if match_data:
+            df_bk = pd.DataFrame(match_data).sort_values(by='ZÜGE (SIEGER)', ascending=True).head(3).reset_index(drop=True)
+            df_bk.index += 1
+            df_bk.insert(0, 'RANG', df_bk.index)
+            st.dataframe(df_bk[['RANG', 'SPIEL', 'ZÜGE (SIEGER)', 'ERGEBNIS']], hide_index=True, use_container_width=True)
+        else:
+            st.caption("Noch keine Spiele absolviert.")
+
+    st.write("---")
+    # EXCEL EXPORT (Alle Tabellen)
+    st.subheader("💾 Turnier Archivieren")
+    st.write("Lade dir das komplette Turnier als Excel-Datei herunter.")
+    
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df_table[['RANG', 'NAME', 'SP', 'S', 'N', 'DIFF', 'S%', 'SERIE', 'STATUS']].to_excel(writer, sheet_name="Tabelle", index=False)
+        df_matches.to_excel(writer, sheet_name="Spielplan", index=False)
+        df_quote[['RANG', 'NAME', 'TREFFER', 'WÜRFE', 'QUOTE']].to_excel(writer, sheet_name="Trefferquoten", index=False)
+        if not df_gw.empty: df_gw[['RANG', 'NAME', 'SIEGTREFFER']].to_excel(writer, sheet_name="Vollstrecker", index=False)
+        if not df_bomb.empty: df_bomb[['RANG', 'NAME', 'DREIFACHBECHER-TREFFER']].to_excel(writer, sheet_name="Dreifachbecher", index=False)
+        if not df_clutch.empty: df_clutch[['RANG', 'NAME', 'NACHWURF RETTER']].to_excel(writer, sheet_name="Nachwurf Retter", index=False)
+        if not df_dk.empty: df_dk[['RANG', 'NAME', 'FEHLER']].to_excel(writer, sheet_name="Dummkopf", index=False)
+        if match_data: 
+            df_hs[['RANG', 'SPIEL', 'ERGEBNIS', 'DIFF', 'ZÜGE (SIEGER)']].to_excel(writer, sheet_name="Höchste Siege", index=False)
+            df_bk[['RANG', 'SPIEL', 'ZÜGE (SIEGER)', 'ERGEBNIS']].to_excel(writer, sheet_name="Schnellste Siege", index=False)
+        
+    st.download_button(
+        label="📥 Gesamtes Turnier als Excel speichern",
+        data=buffer.getvalue(),
+        file_name=f"Bierpong_Turnier_{st.session_state.t_date}.xlsx",
+        mime="application/vnd.ms-excel",
+        type="primary"
+    )
